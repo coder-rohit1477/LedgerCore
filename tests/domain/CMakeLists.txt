@@ -3,6 +3,7 @@ add_executable(ledgercore_domain_tests
     ChartOfAccountsTest.cpp
     MoneyTest.cpp
     JournalEntryTest.cpp
+    NormalBalanceTest.cpp
 )
 
 target_link_libraries(ledgercore_domain_tests

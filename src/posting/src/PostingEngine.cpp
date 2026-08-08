@@ -9,39 +9,11 @@
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountId.h"
 #include "ledgercore/domain/JournalEntryLine.h"
+#include "ledgercore/domain/NormalBalance.h"
 #include "ledgercore/ledger/LedgerExceptions.h"
 #include "ledgercore/posting/PostingExceptions.h"
 
 namespace ledgercore::posting {
-
-namespace {
-
-// Whether AccountType's normal balance is Debit (true) or Credit (false).
-// The only place in LedgerCore that AccountType and posting effects meet
-// -- deliberately not in Account or JournalEntry.
-bool isDebitNormal(domain::AccountType type) {
-    switch (type) {
-        case domain::AccountType::Asset:
-        case domain::AccountType::Expense:
-            return true;
-        case domain::AccountType::Liability:
-        case domain::AccountType::Equity:
-        case domain::AccountType::Revenue:
-            return false;
-    }
-    return true;
-}
-
-// The signed effect of one JournalEntryLine on its account's balance,
-// under the normal-balance sign convention: a line on the account type's
-// normal side increases the balance, a line on the opposite side
-// decreases it.
-domain::Money signedEffect(domain::AccountType type, const domain::JournalEntryLine& line) {
-    const bool lineIsOnNormalSide = (line.isDebit() == isDebitNormal(type));
-    return lineIsOnNormalSide ? line.amount() : -line.amount();
-}
-
-} // namespace
 
 ledger::PostingId post(const domain::JournalEntry& entry,
                         const domain::ChartOfAccounts& chart,
@@ -78,7 +50,7 @@ ledger::PostingId post(const domain::JournalEntry& entry,
     std::unordered_map<std::uint64_t, std::size_t> deltaIndexByAccountId;
     for (std::size_t i = 0; i < entry.lines().size(); ++i) {
         const domain::JournalEntryLine& line = entry.lines()[i];
-        const domain::Money effect = signedEffect(resolvedAccounts[i]->type(), line);
+        const domain::Money effect = domain::signedEffect(resolvedAccounts[i]->type(), line.side(), line.amount());
 
         auto it = deltaIndexByAccountId.find(line.accountId().value());
         if (it == deltaIndexByAccountId.end()) {
@@ -98,18 +70,6 @@ ledger::PostingId post(const domain::JournalEntry& entry,
 
     // Phase 3: commit. Everything fallible has already succeeded.
     return ledger.commit(entry, std::move(newBalances));
-}
-
-DebitCreditAmounts debitCreditPresentation(domain::AccountType type, const domain::Money& balance) {
-    const domain::Money zero = domain::Money::zero(balance.currency());
-    const bool debitNormal = isDebitNormal(type);
-
-    if (balance.isNegative()) {
-        const domain::Money magnitude = -balance;
-        return debitNormal ? DebitCreditAmounts{zero, magnitude} : DebitCreditAmounts{magnitude, zero};
-    }
-
-    return debitNormal ? DebitCreditAmounts{balance, zero} : DebitCreditAmounts{zero, balance};
 }
 
 } // namespace ledgercore::posting

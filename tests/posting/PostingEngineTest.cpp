@@ -17,6 +17,7 @@
 #include "ledgercore/domain/JournalEntry.h"
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/Money.h"
+#include "ledgercore/domain/NormalBalance.h"
 #include "ledgercore/ledger/Ledger.h"
 #include "ledgercore/ledger/LedgerExceptions.h"
 #include "ledgercore/ledger/PostedJournalEntry.h"
@@ -30,6 +31,8 @@ using ledgercore::domain::AccountId;
 using ledgercore::domain::AccountType;
 using ledgercore::domain::ChartOfAccounts;
 using ledgercore::domain::Currency;
+using ledgercore::domain::DebitCreditAmounts;
+using ledgercore::domain::debitCreditPresentation;
 using ledgercore::domain::JournalEntry;
 using ledgercore::domain::JournalEntryLine;
 using ledgercore::domain::Money;
@@ -39,8 +42,6 @@ using ledgercore::ledger::LedgerCurrencyMismatchException;
 using ledgercore::ledger::PostedJournalEntry;
 using ledgercore::ledger::PostingId;
 using ledgercore::posting::AccountNotFoundException;
-using ledgercore::posting::DebitCreditAmounts;
-using ledgercore::posting::debitCreditPresentation;
 using ledgercore::posting::InvalidPostingTargetException;
 using ledgercore::posting::post;
 
@@ -483,54 +484,13 @@ TEST(PostingEngineTest, BalanceCorrectnessAcrossMixedEntries) {
 }
 
 // ---------------------------------------------------------------------
-// Trial Balance derivation helper
-// ---------------------------------------------------------------------
-
-TEST(DebitCreditPresentationTest, AllAccountTypeSignCombinationsDeriveCorrectColumn) {
-    Currency usd("USD");
-    struct Case {
-        AccountType type;
-        bool debitNormal;
-    };
-    const Case cases[] = {
-        {AccountType::Asset, true},
-        {AccountType::Expense, true},
-        {AccountType::Liability, false},
-        {AccountType::Equity, false},
-        {AccountType::Revenue, false},
-    };
-
-    const Money positive = Money::fromMajorUnits(100, 0, usd);
-    const Money negative = Money::fromMajorUnits(-100, 0, usd);
-
-    for (const Case& testCase : cases) {
-        const DebitCreditAmounts positiveResult = debitCreditPresentation(testCase.type, positive);
-        const DebitCreditAmounts negativeResult = debitCreditPresentation(testCase.type, negative);
-
-        if (testCase.debitNormal) {
-            EXPECT_EQ(positiveResult.debit, positive);
-            EXPECT_TRUE(positiveResult.credit.isZero());
-            EXPECT_EQ(negativeResult.credit, positive);
-            EXPECT_TRUE(negativeResult.debit.isZero());
-        } else {
-            EXPECT_EQ(positiveResult.credit, positive);
-            EXPECT_TRUE(positiveResult.debit.isZero());
-            EXPECT_EQ(negativeResult.debit, positive);
-            EXPECT_TRUE(negativeResult.credit.isZero());
-        }
-    }
-}
-
-TEST(DebitCreditPresentationTest, ZeroBalanceProducesZeroInBothColumns) {
-    Currency usd("USD");
-    const DebitCreditAmounts result = debitCreditPresentation(AccountType::Asset, Money::zero(usd));
-    EXPECT_TRUE(result.debit.isZero());
-    EXPECT_TRUE(result.credit.isZero());
-}
-
-// ---------------------------------------------------------------------
 // Property-style tests
 // ---------------------------------------------------------------------
+//
+// domain::debitCreditPresentation() itself is unit-tested exhaustively in
+// tests/domain/NormalBalanceTest.cpp. The property test below verifies
+// PostingEngine and that shared helper agree end to end through an actual
+// posting sequence.
 
 TEST(PostingEnginePropertyTest, ReplayingPostedEntriesReproducesBalancesExactly) {
     Currency usd("USD");

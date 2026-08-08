@@ -3,6 +3,7 @@ add_library(ledgercore_domain STATIC
     src/ChartOfAccounts.cpp
     src/Money.cpp
     src/JournalEntry.cpp
+    src/NormalBalance.cpp
 )
 
 target_include_directories(ledgercore_domain
