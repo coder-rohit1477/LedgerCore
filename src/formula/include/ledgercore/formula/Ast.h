@@ -5,6 +5,7 @@
 #include <variant>
 
 #include "ledgercore/domain/AccountCode.h"
+#include "ledgercore/formula/ComputedAccountName.h"
 #include "ledgercore/formula/Rational.h"
 
 namespace ledgercore::formula {
@@ -23,6 +24,15 @@ struct Literal {
 
 struct AccountReference {
     domain::AccountCode code;
+};
+
+// A `@name` reference to a computed account. Deliberately a separate AST
+// alternative from AccountReference, not a shared one distinguished by a
+// flag: the two have no ambiguity at the lexical level (see Lexer.cpp),
+// and keeping them as distinct types means a caller can never confuse
+// which resolver a given reference needs.
+struct ComputedAccountReference {
+    ComputedAccountName name;
 };
 
 enum class UnaryOperator { Plus, Minus };
@@ -55,7 +65,8 @@ struct BinaryExpression {
 // class name can).
 class AstNode {
 public:
-    using Value = std::variant<Literal, AccountReference, UnaryExpression, BinaryExpression>;
+    using Value =
+        std::variant<Literal, AccountReference, ComputedAccountReference, UnaryExpression, BinaryExpression>;
 
     explicit AstNode(Value value) : value_(std::move(value)) {}
 

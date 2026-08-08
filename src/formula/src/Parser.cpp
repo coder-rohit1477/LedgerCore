@@ -123,6 +123,10 @@ private:
             advance();
             return std::make_unique<AstNode>(AccountReference{domain::AccountCode(token.text)});
         }
+        if (token.type == TokenType::ComputedAccountReference) {
+            advance();
+            return std::make_unique<AstNode>(ComputedAccountReference{ComputedAccountName(token.text)});
+        }
         if (token.type == TokenType::LeftParen) {
             advance();
             AstNodePtr inner = parseAdditive();

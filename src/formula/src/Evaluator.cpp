@@ -95,7 +95,8 @@ domain::Money scaleMoney(const domain::Money& money, std::int64_t multiplierNume
     return domain::Money::ofMinorUnits(roundedMinorUnits, money.currency());
 }
 
-FormulaValue evaluateNode(const AstNode& node, const AccountResolver& resolver);
+FormulaValue evaluateNode(const AstNode& node, const AccountResolver& resolver,
+                           const ComputedAccountResolver* computedResolver);
 
 FormulaValue evaluateLiteral(const Literal& literal) {
     return FormulaValue(literal.value);
@@ -105,8 +106,18 @@ FormulaValue evaluateAccountReference(const AccountReference& reference, const A
     return FormulaValue(resolver.resolve(reference.code));
 }
 
-FormulaValue evaluateUnary(const UnaryExpression& expr, const AccountResolver& resolver) {
-    FormulaValue operand = evaluateNode(*expr.operand, resolver);
+FormulaValue evaluateComputedAccountReference(const ComputedAccountReference& reference,
+                                               const ComputedAccountResolver* computedResolver) {
+    if (computedResolver == nullptr) {
+        throw FormulaEvaluationException("Formula references computed account '@" + reference.name.value()
+                                          + "' but no ComputedAccountResolver was supplied");
+    }
+    return FormulaValue(computedResolver->resolve(reference.name));
+}
+
+FormulaValue evaluateUnary(const UnaryExpression& expr, const AccountResolver& resolver,
+                           const ComputedAccountResolver* computedResolver) {
+    FormulaValue operand = evaluateNode(*expr.operand, resolver, computedResolver);
     if (expr.op == UnaryOperator::Plus) {
         return operand;
     }
@@ -116,9 +127,10 @@ FormulaValue evaluateUnary(const UnaryExpression& expr, const AccountResolver& r
     return FormulaValue(-operand.asScalar());
 }
 
-FormulaValue evaluateBinary(const BinaryExpression& expr, const AccountResolver& resolver) {
-    const FormulaValue left = evaluateNode(*expr.left, resolver);
-    const FormulaValue right = evaluateNode(*expr.right, resolver);
+FormulaValue evaluateBinary(const BinaryExpression& expr, const AccountResolver& resolver,
+                            const ComputedAccountResolver* computedResolver) {
+    const FormulaValue left = evaluateNode(*expr.left, resolver, computedResolver);
+    const FormulaValue right = evaluateNode(*expr.right, resolver, computedResolver);
     const bool leftIsMoney = left.isMoney();
     const bool rightIsMoney = right.isMoney();
 
@@ -177,18 +189,21 @@ FormulaValue evaluateBinary(const BinaryExpression& expr, const AccountResolver&
     throw FormulaEvaluationException("Unknown binary operator");
 }
 
-FormulaValue evaluateNode(const AstNode& node, const AccountResolver& resolver) {
+FormulaValue evaluateNode(const AstNode& node, const AccountResolver& resolver,
+                           const ComputedAccountResolver* computedResolver) {
     return std::visit(
-        [&resolver](const auto& alternative) -> FormulaValue {
+        [&resolver, computedResolver](const auto& alternative) -> FormulaValue {
             using T = std::decay_t<decltype(alternative)>;
             if constexpr (std::is_same_v<T, Literal>) {
                 return evaluateLiteral(alternative);
             } else if constexpr (std::is_same_v<T, AccountReference>) {
                 return evaluateAccountReference(alternative, resolver);
+            } else if constexpr (std::is_same_v<T, ComputedAccountReference>) {
+                return evaluateComputedAccountReference(alternative, computedResolver);
             } else if constexpr (std::is_same_v<T, UnaryExpression>) {
-                return evaluateUnary(alternative, resolver);
+                return evaluateUnary(alternative, resolver, computedResolver);
             } else {
-                return evaluateBinary(alternative, resolver);
+                return evaluateBinary(alternative, resolver, computedResolver);
             }
         },
         node.value());
@@ -197,7 +212,12 @@ FormulaValue evaluateNode(const AstNode& node, const AccountResolver& resolver) 
 } // namespace
 
 FormulaValue evaluate(const AstNode& root, const AccountResolver& resolver) {
-    return evaluateNode(root, resolver);
+    return evaluateNode(root, resolver, nullptr);
+}
+
+FormulaValue evaluate(const AstNode& root, const AccountResolver& resolver,
+                       const ComputedAccountResolver& computedResolver) {
+    return evaluateNode(root, resolver, &computedResolver);
 }
 
 } // namespace ledgercore::formula

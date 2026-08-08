@@ -6,6 +6,7 @@
 #include "ledgercore/domain/Money.h"
 #include "ledgercore/formula/AccountResolver.h"
 #include "ledgercore/formula/Ast.h"
+#include "ledgercore/formula/ComputedAccountName.h"
 #include "ledgercore/formula/FormulaExceptions.h"
 #include "ledgercore/formula/Rational.h"
 
@@ -42,6 +43,20 @@ private:
     std::variant<domain::Money, Rational> value_;
 };
 
+// A narrow, caller-supplied abstraction for resolving a `@name` computed
+// account reference to its current Money value -- the exact same role
+// AccountResolver plays for `#code` references, kept as a separate
+// interface rather than folded into AccountResolver because the two
+// reference kinds are never ambiguous (see Ast.h) and a caller resolving
+// one has no obligation to know how to resolve the other.
+class ComputedAccountResolver {
+public:
+    virtual ~ComputedAccountResolver() = default;
+
+    // Throws UnknownComputedAccountException if name is not recognized.
+    virtual domain::Money resolve(const ComputedAccountName& name) const = 0;
+};
+
 // Evaluates an AST against a caller-supplied resolver. Deterministic and
 // side-effect free: the same root plus a resolver returning the same
 // values always produces the same result.
@@ -62,6 +77,17 @@ private:
 // All rejections and overflow/division-by-zero failures throw
 // FormulaEvaluationException. Unknown account references throw
 // UnknownAccountReferenceException.
+//
+// This overload throws FormulaEvaluationException if root contains a
+// ComputedAccountReference -- a caller with no ComputedAccountResolver
+// to offer has no way to resolve one. Use the other overload below for
+// formulas that may contain `@name` references.
 FormulaValue evaluate(const AstNode& root, const AccountResolver& resolver);
+
+// As above, but also resolves ComputedAccountReference nodes (`@name`)
+// via computedResolver. This is the only difference from the overload
+// above; every other rule is identical.
+FormulaValue evaluate(const AstNode& root, const AccountResolver& resolver,
+                       const ComputedAccountResolver& computedResolver);
 
 } // namespace ledgercore::formula

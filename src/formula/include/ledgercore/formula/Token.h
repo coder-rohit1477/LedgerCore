@@ -8,6 +8,7 @@ namespace ledgercore::formula {
 enum class TokenType {
     Number,
     AccountReference,
+    ComputedAccountReference,
     Plus,
     Minus,
     Star,
@@ -18,9 +19,9 @@ enum class TokenType {
 };
 
 // One lexical unit of a formula string: its type, raw source text (the
-// digits of a Number, or the code text after '#' for an
-// AccountReference -- empty for everything else), and the 0-based
-// character offset it started at.
+// digits of a Number, the code text after '#' for an AccountReference,
+// or the name text after '@' for a ComputedAccountReference -- empty for
+// everything else), and the 0-based character offset it started at.
 struct Token {
     TokenType type;
     std::string text;

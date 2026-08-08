@@ -77,6 +77,20 @@ std::vector<Token> tokenize(const std::string& source) {
             continue;
         }
 
+        if (c == '@') {
+            ++i;
+            const std::size_t nameStart = i;
+            while (i < n && isAccountCodeChar(source[i])) {
+                ++i;
+            }
+            if (i == nameStart) {
+                throw FormulaSyntaxException("Expected computed account name after '@'", start);
+            }
+            tokens.push_back(
+                Token{TokenType::ComputedAccountReference, source.substr(nameStart, i - nameStart), start});
+            continue;
+        }
+
         if (isDigitChar(c)) {
             while (i < n && isDigitChar(source[i])) {
                 ++i;
