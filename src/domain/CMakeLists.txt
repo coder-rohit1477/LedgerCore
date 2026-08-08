@@ -1,6 +1,7 @@
 add_library(ledgercore_domain STATIC
     src/Account.cpp
     src/ChartOfAccounts.cpp
+    src/Money.cpp
 )
 
 target_include_directories(ledgercore_domain

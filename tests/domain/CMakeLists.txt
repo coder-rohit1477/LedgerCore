@@ -1,6 +1,7 @@
 add_executable(ledgercore_domain_tests
     AccountTest.cpp
     ChartOfAccountsTest.cpp
+    MoneyTest.cpp
 )
 
 target_link_libraries(ledgercore_domain_tests
