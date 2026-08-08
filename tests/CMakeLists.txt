@@ -24,3 +24,5 @@ target_link_libraries(ledgercore_smoke_tests
 )
 
 gtest_discover_tests(ledgercore_smoke_tests)
+
+add_subdirectory(domain)
