@@ -51,18 +51,26 @@ public:
     Account* findByCode(const AccountCode& code);
     const Account* findByCode(const AccountCode& code) const;
 
+    // AccountId lookup for consumers that only have an AccountId (e.g. a
+    // JournalEntryLine, which references accounts by AccountId rather than
+    // AccountCode). Read-only: unlike findByCode(), there is no mutable
+    // overload, since nothing outside ChartOfAccounts is allowed to mutate
+    // an Account through this path.
+    const Account* findById(AccountId id) const;
+
     bool contains(const AccountCode& code) const;
 
     std::vector<const Account*> rootAccounts() const;
 
 private:
     AccountId nextAccountId();
-    void registerCode(Account* account);
+    void registerAccount(Account* account);
     void ensureCodeIsUnique(const AccountCode& code) const;
     void ensureBelongsToThisChart(const Account& account) const;
 
     std::vector<std::unique_ptr<Account>> topLevelAccounts_;
     std::unordered_map<std::string, Account*> codeIndex_;
+    std::unordered_map<std::uint64_t, Account*> idIndex_;
     std::uint64_t nextId_ = 1;
 };
 

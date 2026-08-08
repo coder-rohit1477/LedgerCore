@@ -4,12 +4,14 @@
 
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountCode.h"
+#include "ledgercore/domain/AccountId.h"
 #include "ledgercore/domain/AccountType.h"
 #include "ledgercore/domain/ChartOfAccounts.h"
 #include "ledgercore/domain/DomainExceptions.h"
 
 using ledgercore::domain::Account;
 using ledgercore::domain::AccountCode;
+using ledgercore::domain::AccountId;
 using ledgercore::domain::AccountType;
 using ledgercore::domain::ChartOfAccounts;
 using ledgercore::domain::DuplicateAccountCodeException;
@@ -87,6 +89,43 @@ TEST(ChartOfAccountsTest, ContainsReflectsKnownCodes) {
 
     EXPECT_TRUE(chart.contains(AccountCode("1000")));
     EXPECT_FALSE(chart.contains(AccountCode("9999")));
+}
+
+TEST(ChartOfAccountsTest, FindByIdReturnsMatchingAccount) {
+    ChartOfAccounts chart;
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+
+    EXPECT_EQ(chart.findById(assets.id()), &assets);
+    EXPECT_EQ(chart.findById(cash.id()), &cash);
+}
+
+TEST(ChartOfAccountsTest, FindByIdReturnsNullForUnknownId) {
+    ChartOfAccounts chart;
+    chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+
+    EXPECT_EQ(chart.findById(AccountId(999)), nullptr);
+}
+
+TEST(ChartOfAccountsTest, FindByIdDoesNotConfuseIdsAcrossTwoCharts) {
+    ChartOfAccounts chartA;
+    ChartOfAccounts chartB;
+    Account& assetsInA = chartA.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& assetsInB = chartB.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+
+    ASSERT_EQ(assetsInA.id(), assetsInB.id());
+    EXPECT_EQ(chartA.findById(assetsInA.id()), &assetsInA);
+    EXPECT_EQ(chartB.findById(assetsInB.id()), &assetsInB);
+}
+
+TEST(ChartOfAccountsTest, FindByIdIsConstCorrect) {
+    ChartOfAccounts chart;
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    const ChartOfAccounts& constChart = chart;
+
+    const Account* found = constChart.findById(assets.id());
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->code().value(), "1000");
 }
 
 TEST(ChartOfAccountsTest, RootAccountsReturnsAllTopLevelAccountsInInsertionOrder) {

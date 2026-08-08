@@ -12,7 +12,7 @@ Account& ChartOfAccounts::addRootAccount(AccountCode code, std::string name, Acc
     const AccountId id = nextAccountId();
     auto account = std::unique_ptr<Account>(new Account(id, std::move(code), std::move(name), type, nullptr));
     Account* raw = account.get();
-    registerCode(raw);
+    registerAccount(raw);
     topLevelAccounts_.push_back(std::move(account));
     return *raw;
 }
@@ -23,7 +23,7 @@ Account& ChartOfAccounts::addChildAccount(Account& parent, AccountCode code, std
 
     const AccountId id = nextAccountId();
     Account* child = parent.addChild(id, std::move(code), std::move(name));
-    registerCode(child);
+    registerAccount(child);
     return *child;
 }
 
@@ -36,6 +36,11 @@ Account* ChartOfAccounts::findByCode(const AccountCode& code) {
     // Standard const-overload-calls-const-then-const_casts-back idiom:
     // safe here because *this is genuinely non-const in this overload.
     return const_cast<Account*>(static_cast<const ChartOfAccounts&>(*this).findByCode(code));
+}
+
+const Account* ChartOfAccounts::findById(AccountId id) const {
+    auto it = idIndex_.find(id.value());
+    return it == idIndex_.end() ? nullptr : it->second;
 }
 
 bool ChartOfAccounts::contains(const AccountCode& code) const {
@@ -55,8 +60,9 @@ AccountId ChartOfAccounts::nextAccountId() {
     return AccountId(nextId_++);
 }
 
-void ChartOfAccounts::registerCode(Account* account) {
+void ChartOfAccounts::registerAccount(Account* account) {
     codeIndex_.emplace(account->code().value(), account);
+    idIndex_.emplace(account->id().value(), account);
 }
 
 void ChartOfAccounts::ensureCodeIsUnique(const AccountCode& code) const {

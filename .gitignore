@@ -18,3 +18,5 @@ _deps/
 .vscode/
 .idea/
 .DS_Store
+
+.cache/
