@@ -32,4 +32,12 @@ public:
     explicit DuplicateAccountCodeException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown by ChartOfAccounts::addChildAccount() when the supplied parent
+// Account does not belong to this ChartOfAccounts instance (e.g. it was
+// obtained from a different chart).
+class ForeignAccountException : public ledgercore::LedgerException {
+public:
+    explicit ForeignAccountException(const std::string& message) : LedgerException(message) {}
+};
+
 } // namespace ledgercore::domain

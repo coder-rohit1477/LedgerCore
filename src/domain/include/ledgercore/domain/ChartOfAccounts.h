@@ -26,6 +26,11 @@ namespace ledgercore::domain {
 //   - A child Account always has the same AccountType as its parent --
 //     addChildAccount() takes no AccountType parameter, so a mismatch
 //     cannot be expressed, let alone rejected.
+//   - addChildAccount() rejects a parent Account that does not belong to
+//     this ChartOfAccounts (e.g. one obtained from a different chart),
+//     since attaching to it would register the new account's code in
+//     this chart's index while the Account itself lives in the other
+//     chart's tree -- a dangling pointer once that chart is destroyed.
 //
 // ChartOfAccounts owns its top-level accounts directly; there is no
 // synthetic root node, since a chart of accounts has no single real
@@ -54,6 +59,7 @@ private:
     AccountId nextAccountId();
     void registerCode(Account* account);
     void ensureCodeIsUnique(const AccountCode& code) const;
+    void ensureBelongsToThisChart(const Account& account) const;
 
     std::vector<std::unique_ptr<Account>> topLevelAccounts_;
     std::unordered_map<std::string, Account*> codeIndex_;

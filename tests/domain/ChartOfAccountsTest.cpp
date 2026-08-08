@@ -13,6 +13,7 @@ using ledgercore::domain::AccountCode;
 using ledgercore::domain::AccountType;
 using ledgercore::domain::ChartOfAccounts;
 using ledgercore::domain::DuplicateAccountCodeException;
+using ledgercore::domain::ForeignAccountException;
 
 TEST(ChartOfAccountsTest, DuplicateRootCodeIsRejected) {
     ChartOfAccounts chart;
@@ -32,6 +33,38 @@ TEST(ChartOfAccountsTest, DuplicateChildCodeIsRejectedEvenAcrossBranches) {
     EXPECT_THROW(
         chart.addChildAccount(liabilities, AccountCode("1110"), "Accounts Payable"),
         DuplicateAccountCodeException);
+}
+
+TEST(ChartOfAccountsTest, AccountFromAnotherChartCannotBeUsedAsParent) {
+    ChartOfAccounts chartA;
+    ChartOfAccounts chartB;
+    Account& assetsInA = chartA.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+
+    EXPECT_THROW(
+        chartB.addChildAccount(assetsInA, AccountCode("1110"), "Cash"),
+        ForeignAccountException);
+}
+
+TEST(ChartOfAccountsTest, OwnAccountIsStillAcceptedAsParent) {
+    ChartOfAccounts chart;
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+
+    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+    EXPECT_EQ(cash.parent(), &assets);
+}
+
+TEST(ChartOfAccountsTest, ForeignParentDoesNotCorruptEitherChartsIndex) {
+    ChartOfAccounts chartA;
+    ChartOfAccounts chartB;
+    Account& assetsInA = chartA.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+
+    EXPECT_THROW(
+        chartB.addChildAccount(assetsInA, AccountCode("1110"), "Cash"),
+        ForeignAccountException);
+
+    EXPECT_FALSE(chartA.contains(AccountCode("1110")));
+    EXPECT_FALSE(chartB.contains(AccountCode("1110")));
+    EXPECT_TRUE(assetsInA.isLeaf());
 }
 
 TEST(ChartOfAccountsTest, FindByCodeReturnsMatchingAccount) {

@@ -18,6 +18,7 @@ Account& ChartOfAccounts::addRootAccount(AccountCode code, std::string name, Acc
 }
 
 Account& ChartOfAccounts::addChildAccount(Account& parent, AccountCode code, std::string name) {
+    ensureBelongsToThisChart(parent);
     ensureCodeIsUnique(code);
 
     const AccountId id = nextAccountId();
@@ -61,6 +62,13 @@ void ChartOfAccounts::registerCode(Account* account) {
 void ChartOfAccounts::ensureCodeIsUnique(const AccountCode& code) const {
     if (contains(code)) {
         throw DuplicateAccountCodeException("Account code already exists: " + code.value());
+    }
+}
+
+void ChartOfAccounts::ensureBelongsToThisChart(const Account& account) const {
+    auto it = codeIndex_.find(account.code().value());
+    if (it == codeIndex_.end() || it->second != &account) {
+        throw ForeignAccountException("Account does not belong to this ChartOfAccounts: " + account.code().value());
     }
 }
 
