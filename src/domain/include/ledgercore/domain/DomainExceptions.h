@@ -69,4 +69,25 @@ public:
     explicit MoneyOverflowException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown when a JournalEntryLine's amount is not strictly positive
+// (zero or negative).
+class InvalidJournalEntryLineException : public ledgercore::LedgerException {
+public:
+    explicit InvalidJournalEntryLineException(const std::string& message) : LedgerException(message) {}
+};
+
+// Thrown when a JournalEntry violates a structural invariant that isn't
+// specifically about balance (fewer than two lines, empty description).
+class InvalidJournalEntryException : public ledgercore::LedgerException {
+public:
+    explicit InvalidJournalEntryException(const std::string& message) : LedgerException(message) {}
+};
+
+// Thrown by JournalEntry::create() when total debits do not exactly
+// equal total credits.
+class UnbalancedJournalEntryException : public ledgercore::LedgerException {
+public:
+    explicit UnbalancedJournalEntryException(const std::string& message) : LedgerException(message) {}
+};
+
 } // namespace ledgercore::domain
