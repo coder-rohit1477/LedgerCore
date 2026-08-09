@@ -4,6 +4,7 @@ add_executable(ledgercore_domain_tests
     MoneyTest.cpp
     JournalEntryTest.cpp
     NormalBalanceTest.cpp
+    PeriodTest.cpp
 )
 
 target_link_libraries(ledgercore_domain_tests

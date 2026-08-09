@@ -1,6 +1,9 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -10,6 +13,7 @@
 #include "ledgercore/domain/ChartOfAccounts.h"
 #include "ledgercore/domain/Currency.h"
 #include "ledgercore/domain/Money.h"
+#include "ledgercore/domain/Period.h"
 #include "ledgercore/ledger/Ledger.h"
 
 namespace ledgercore::trialbalance {
@@ -78,6 +82,31 @@ public:
     // actually reachable.
     static TrialBalance generate(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger);
 
+    // Same account universe and presentation rules as generate() (every
+    // leaf account, including zero-activity ones, ordered by ascending
+    // AccountCode), but each account's balance is computed by replaying
+    // ledger.postedEntries() and accumulating domain::signedEffect() for
+    // every line whose JournalEntry::date() is strictly before cutoff --
+    // i.e. "as of" the instant immediately preceding cutoff. A whole
+    // JournalEntry is included or excluded as a single unit; its lines
+    // are never split across the boundary. Entries are not assumed to be
+    // sorted by date -- every posted entry is individually checked.
+    //
+    // Throws UnbalancedTrialBalanceException under the same
+    // circumstances as generate().
+    static TrialBalance generateAsOf(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
+                                      std::chrono::system_clock::time_point cutoff);
+
+    // Same as generateAsOf(), but includes a posted entry when
+    // period.contains(entry.date()) rather than a single cutoff --
+    // i.e. only activity within [period.start(), period.end()). A whole
+    // JournalEntry is included or excluded as a single unit.
+    //
+    // Throws UnbalancedTrialBalanceException under the same
+    // circumstances as generate().
+    static TrialBalance generateForPeriod(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
+                                           const domain::Period& period);
+
     const domain::Currency& currency() const noexcept { return currency_; }
     const std::vector<TrialBalanceLine>& lines() const noexcept { return lines_; }
     const domain::Money& totalDebits() const noexcept { return totalDebits_; }
@@ -86,6 +115,16 @@ public:
 private:
     TrialBalance(domain::Currency currency, std::vector<TrialBalanceLine> lines, domain::Money totalDebits,
                  domain::Money totalCredits);
+
+    // Shared tail for generateAsOf()/generateForPeriod(): given each
+    // account's already-accumulated signed balance (accountId.value() ->
+    // Money; an absent key means zero, i.e. no activity), builds the
+    // sorted TrialBalanceLine list and totals exactly like generate()
+    // does, and applies the same balance check. generate() itself does
+    // not use this helper -- its own implementation is left untouched.
+    static TrialBalance finalize(const domain::ChartOfAccounts& chart,
+                                  const std::unordered_map<std::uint64_t, domain::Money>& balances,
+                                  const domain::Currency& currency);
 
     domain::Currency currency_;
     std::vector<TrialBalanceLine> lines_;

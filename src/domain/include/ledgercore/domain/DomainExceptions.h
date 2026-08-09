@@ -90,4 +90,11 @@ public:
     explicit UnbalancedJournalEntryException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown by Period's constructor when start >= end: a period must span
+// a genuinely non-empty, forward-moving range.
+class InvalidPeriodException : public ledgercore::LedgerException {
+public:
+    explicit InvalidPeriodException(const std::string& message) : LedgerException(message) {}
+};
+
 } // namespace ledgercore::domain
