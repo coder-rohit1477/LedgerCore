@@ -17,14 +17,18 @@ target_include_directories(ledgercore_cli_logic
         ${CMAKE_SOURCE_DIR}/src/cli/src
 )
 
+# domain, ledger, posting, trialbalance, formula, and computed are
+# deliberately not listed here even though LedgerSession/CommandParser/
+# InputParsing/OutputFormatting use their types directly: persistence
+# already PUBLIC-links domain+ledger+posting+computed (computed itself
+# PUBLIC-links formula), and reporting already PUBLIC-links domain+
+# trialbalance, so CMake propagates all of their headers and linked
+# libraries transitively. Listing them again here would duplicate them on
+# the link line, the same "ignoring duplicate libraries" issue already
+# fixed once in src/cli/CMakeLists.txt.
 target_link_libraries(ledgercore_cli_logic
     PUBLIC
-        ledgercore_domain
-        ledgercore_ledger
-        ledgercore_posting
-        ledgercore_trialbalance
-        ledgercore_formula
-        ledgercore_computed
+        ledgercore_persistence
         ledgercore_reporting
     PRIVATE
         ledgercore_warnings
@@ -33,6 +37,7 @@ target_link_libraries(ledgercore_cli_logic
 add_executable(ledgercore_cli_unit_tests
     InputParsingTest.cpp
     CommandParserTest.cpp
+    LedgerSessionTest.cpp
 )
 
 target_link_libraries(ledgercore_cli_unit_tests

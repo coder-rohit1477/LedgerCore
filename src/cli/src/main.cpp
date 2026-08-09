@@ -3,6 +3,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "CommandParser.h"
 #include "InputParsing.h"
@@ -22,6 +23,8 @@
 #include "ledgercore/formula/Evaluator.h"
 #include "ledgercore/formula/Parser.h"
 #include "ledgercore/ledger/Ledger.h"
+#include "ledgercore/persistence/PersistenceExceptions.h"
+#include "ledgercore/persistence/SessionStore.h"
 #include "ledgercore/posting/PostingEngine.h"
 #include "ledgercore/posting/PostingExceptions.h"
 #include "ledgercore/reporting/BalanceSheet.h"
@@ -160,6 +163,22 @@ void executeComputedEval(const ParsedCommand& pc, LedgerSession& session, std::o
     out << result.toString() << "\n";
 }
 
+void executeSave(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
+    persistence::save(session.chart(), session.ledger(), session.computedAccounts(), pc.path);
+    out << "Saved LedgerCore session to \"" << pc.path << "\".\n";
+}
+
+void executeLoad(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
+    // persistence::load() does every fallible step (parsing, replaying
+    // through posting::post()) before it ever returns -- if it throws,
+    // execution never reaches replaceState(), and the session is left
+    // completely untouched. Only a successful return here can possibly
+    // reach the unconditionally-noexcept swap.
+    persistence::LoadedSession loaded = persistence::load(pc.path);
+    session.replaceState(std::move(loaded));
+    out << "Loaded LedgerCore session from \"" << pc.path << "\".\n";
+}
+
 void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
     switch (pc.kind) {
         case CommandKind::AccountCreateRoot:
@@ -198,6 +217,12 @@ void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out)
         case CommandKind::ComputedEval:
             executeComputedEval(pc, session, out);
             return;
+        case CommandKind::Save:
+            executeSave(pc, session, out);
+            return;
+        case CommandKind::Load:
+            executeLoad(pc, session, out);
+            return;
         case CommandKind::Exit:
             return;
     }
@@ -233,6 +258,16 @@ std::optional<int> runOneLine(const std::string& line, LedgerSession& session, s
     } catch (const CliUsageError& e) {
         err << "error: " << e.what() << "\n";
         return exitOnFailure ? std::optional<int>(1) : std::nullopt;
+    } catch (const persistence::PersistenceException& e) {
+        // A snapshot problem (unreadable file, malformed record, unsupported
+        // version) is an infrastructure/usage-level failure, not an
+        // accounting-rule violation -- persistence::PersistenceException is
+        // deliberately not a ledgercore::LedgerException (see
+        // PersistenceExceptions.h), so it needs its own clause here rather
+        // than falling into the LedgerException handler below, and is
+        // mapped to the same exit code as CliUsageError.
+        err << "error: " << e.what() << "\n";
+        return exitOnFailure ? std::optional<int>(1) : std::nullopt;
     } catch (const ledgercore::LedgerException& e) {
         err << "error: " << e.what() << "\n";
         return exitOnFailure ? std::optional<int>(2) : std::nullopt;
@@ -241,8 +276,10 @@ std::optional<int> runOneLine(const std::string& line, LedgerSession& session, s
 }
 
 int runRepl(LedgerSession& session) {
-    std::cout << "LedgerCore CLI -- in-memory session; all state is lost when this process exits.\n";
-    std::cout << "Commands: account, post, trial-balance, balance-sheet, income-statement, formula, computed.\n";
+    std::cout << "LedgerCore CLI -- in-memory session; state is lost when this process exits unless you 'save' it "
+                  "first.\n";
+    std::cout << "Commands: account, post, trial-balance, balance-sheet, income-statement, formula, computed, "
+                  "save, load.\n";
     std::cout << "Type 'exit' or 'quit' to leave, or send EOF (Ctrl-D).\n";
 
     std::string line;

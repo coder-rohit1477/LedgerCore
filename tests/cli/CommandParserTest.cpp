@@ -158,4 +158,53 @@ TEST(CommandParserTest, ValidFormulaEvalCommandJoinsUnquotedTokens) {
     EXPECT_EQ(pc->expression, "#4000 - #5000");
 }
 
+// ---------------------------------------------------------------------
+// save / load
+// ---------------------------------------------------------------------
+
+TEST(CommandParserTest, ValidSaveCommand) {
+    const std::optional<ParsedCommand> pc = parseLine("save ledger.snapshot");
+    ASSERT_TRUE(pc.has_value());
+    EXPECT_EQ(pc->kind, CommandKind::Save);
+    EXPECT_EQ(pc->path, "ledger.snapshot");
+}
+
+TEST(CommandParserTest, ValidLoadCommand) {
+    const std::optional<ParsedCommand> pc = parseLine("load ledger.snapshot");
+    ASSERT_TRUE(pc.has_value());
+    EXPECT_EQ(pc->kind, CommandKind::Load);
+    EXPECT_EQ(pc->path, "ledger.snapshot");
+}
+
+TEST(CommandParserTest, SaveCommandSupportsQuotedPathWithSpaces) {
+    const std::optional<ParsedCommand> pc = parseLine("save \"my ledger.snapshot\"");
+    ASSERT_TRUE(pc.has_value());
+    EXPECT_EQ(pc->kind, CommandKind::Save);
+    EXPECT_EQ(pc->path, "my ledger.snapshot");
+}
+
+TEST(CommandParserTest, SaveWithNoPathThrows) {
+    EXPECT_THROW(parseLine("save"), CliUsageError);
+}
+
+TEST(CommandParserTest, LoadWithNoPathThrows) {
+    EXPECT_THROW(parseLine("load"), CliUsageError);
+}
+
+TEST(CommandParserTest, SaveWithTwoPathsThrows) {
+    EXPECT_THROW(parseLine("save a b"), CliUsageError);
+}
+
+TEST(CommandParserTest, LoadWithTwoPathsThrows) {
+    EXPECT_THROW(parseLine("load a b"), CliUsageError);
+}
+
+TEST(CommandParserTest, SaveWithUnknownFlagThrows) {
+    EXPECT_THROW(parseLine("save --unknown ledger.snapshot"), CliUsageError);
+}
+
+TEST(CommandParserTest, LoadWithUnknownFlagThrows) {
+    EXPECT_THROW(parseLine("load --unknown ledger.snapshot"), CliUsageError);
+}
+
 } // namespace

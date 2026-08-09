@@ -293,6 +293,30 @@ ParsedCommand parseComputed(const std::vector<std::string>& tokens) {
     throw CliUsageError("unknown 'computed' subcommand: '" + sub + "'");
 }
 
+ParsedCommand parseSave(const std::vector<std::string>& tokens) {
+    RawArgs args = splitRawArgs(tokens, 1);
+    rejectUnknownFlags(args, {});
+    if (args.positionals.size() != 1) {
+        throw CliUsageError("'save' requires exactly one path argument");
+    }
+    ParsedCommand pc;
+    pc.kind = CommandKind::Save;
+    pc.path = args.positionals.front();
+    return pc;
+}
+
+ParsedCommand parseLoad(const std::vector<std::string>& tokens) {
+    RawArgs args = splitRawArgs(tokens, 1);
+    rejectUnknownFlags(args, {});
+    if (args.positionals.size() != 1) {
+        throw CliUsageError("'load' requires exactly one path argument");
+    }
+    ParsedCommand pc;
+    pc.kind = CommandKind::Load;
+    pc.path = args.positionals.front();
+    return pc;
+}
+
 } // namespace
 
 std::vector<std::string> tokenizeLine(const std::string& line) {
@@ -364,6 +388,12 @@ std::optional<ParsedCommand> parseLine(const std::string& line) {
     }
     if (verb == "computed") {
         return parseComputed(tokens);
+    }
+    if (verb == "save") {
+        return parseSave(tokens);
+    }
+    if (verb == "load") {
+        return parseLoad(tokens);
     }
 
     throw CliUsageError("unknown command: '" + verb + "'");

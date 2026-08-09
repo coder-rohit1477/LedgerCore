@@ -18,7 +18,7 @@ public:
     explicit CliUsageError(const std::string& message) : std::runtime_error(message) {}
 };
 
-// The seven top-level verbs, plus their subcommands where they have more
+// The nine top-level verbs, plus their subcommands where they have more
 // than one, plus the REPL/script "exit" pseudo-command.
 enum class CommandKind {
     AccountCreateRoot,
@@ -33,6 +33,8 @@ enum class CommandKind {
     ComputedDefine,
     ComputedList,
     ComputedEval,
+    Save,
+    Load,
     Exit
 };
 
@@ -75,6 +77,9 @@ struct ParsedCommand {
     // formula eval / computed define / computed eval
     std::string expression;
     std::string computedName;
+
+    // save / load
+    std::string path;
 };
 
 // Splits one input line into tokens on whitespace, with basic
