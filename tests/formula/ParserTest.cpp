@@ -183,3 +183,12 @@ TEST(ParserTest, EmptyFormulaThrows) {
 TEST(ParserTest, UnmatchedClosingParenThrows) {
     EXPECT_THROW(parse("1)"), FormulaSyntaxException);
 }
+
+TEST(ParserTest, UnspacedMinusBetweenAccountReferencesIsASyntaxError) {
+    // Lexes as reference "1000-" followed directly by reference "2000"
+    // (see Lexer.h), which is not a valid expression -- a loud error, not
+    // a silent misreading. "#1000 - #2000" is the subtraction.
+    EXPECT_THROW(parse("#1000-#2000"), FormulaSyntaxException);
+    EXPECT_NO_THROW(parse("#1000 - #2000"));
+    EXPECT_NO_THROW(parse("#1000 -#2000"));
+}

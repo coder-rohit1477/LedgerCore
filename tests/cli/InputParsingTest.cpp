@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <string>
 
 #include "CommandParser.h"
 #include "ledgercore/domain/AccountType.h"
@@ -143,6 +144,57 @@ TEST(InputParsingTest, InvalidDateDayOutOfRangeThrowsCliUsageError) {
 
 TEST(InputParsingTest, InvalidDateEmptyStringThrowsCliUsageError) {
     EXPECT_THROW(parseDate(""), CliUsageError);
+}
+
+// Calendar validity: month-specific day counts and Gregorian leap years.
+// An impossible day is rejected, never rolled into the next month.
+TEST(InputParsingTest, ValidOrdinaryDatesParse) {
+    EXPECT_NO_THROW(parseDate("2026-01-01"));
+    EXPECT_NO_THROW(parseDate("2026-06-15"));
+    EXPECT_NO_THROW(parseDate("2026-12-31"));
+}
+
+TEST(InputParsingTest, FebruaryTwentyEighthIsValidInAnyYear) {
+    EXPECT_NO_THROW(parseDate("2026-02-28"));
+    EXPECT_NO_THROW(parseDate("2024-02-28"));
+}
+
+TEST(InputParsingTest, FebruaryTwentyNinthIsValidOnlyInLeapYears) {
+    EXPECT_NO_THROW(parseDate("2024-02-29"));  // divisible by 4
+    EXPECT_NO_THROW(parseDate("2000-02-29"));  // divisible by 400
+    EXPECT_THROW(parseDate("2026-02-29"), CliUsageError);
+    EXPECT_THROW(parseDate("1900-02-29"), CliUsageError);  // divisible by 100, not 400
+    EXPECT_THROW(parseDate("2100-02-29"), CliUsageError);
+}
+
+TEST(InputParsingTest, LeapDayIsExactlyOneDayAfterFebruaryTwentyEighth) {
+    EXPECT_EQ(parseDate("2024-02-29") - parseDate("2024-02-28"), std::chrono::hours(24));
+    EXPECT_EQ(parseDate("2024-03-01") - parseDate("2024-02-29"), std::chrono::hours(24));
+}
+
+TEST(InputParsingTest, FebruaryDaysBeyondMonthLengthAreRejected) {
+    EXPECT_THROW(parseDate("2026-02-30"), CliUsageError);
+    EXPECT_THROW(parseDate("2026-02-31"), CliUsageError);
+    EXPECT_THROW(parseDate("2024-02-30"), CliUsageError);
+}
+
+TEST(InputParsingTest, ThirtyDayMonthsRejectTheThirtyFirst) {
+    for (const char* month : {"04", "06", "09", "11"}) {
+        EXPECT_NO_THROW(parseDate(std::string("2026-") + month + "-30")) << month;
+        EXPECT_THROW(parseDate(std::string("2026-") + month + "-31"), CliUsageError) << month;
+    }
+}
+
+TEST(InputParsingTest, ThirtyOneDayMonthsAcceptTheThirtyFirst) {
+    for (const char* month : {"01", "03", "05", "07", "08", "10", "12"}) {
+        EXPECT_NO_THROW(parseDate(std::string("2026-") + month + "-31")) << month;
+    }
+}
+
+TEST(InputParsingTest, InvalidMonthAndDayZeroAreRejected) {
+    EXPECT_THROW(parseDate("2026-00-10"), CliUsageError);
+    EXPECT_THROW(parseDate("2026-13-01"), CliUsageError);
+    EXPECT_THROW(parseDate("2026-04-00"), CliUsageError);
 }
 
 // Supported range: 1900-01-01 .. 2199-12-31 (the persistence format's

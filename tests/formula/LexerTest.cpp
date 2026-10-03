@@ -64,6 +64,84 @@ TEST(LexerTest, AccountReferenceWithDotsAndDashes) {
     EXPECT_EQ(tokens[0].text, "1000.1-a_b");
 }
 
+// ---------------------------------------------------------------------
+// Reference grammar: '-' and '.' are code characters (see Lexer.h), so a
+// reference is maximal munch and subtraction right after one must be
+// separated by whitespace or a closing parenthesis.
+// ---------------------------------------------------------------------
+
+TEST(LexerTest, HyphenDirectlyAfterReferenceIsPartOfTheAccountCode) {
+    std::vector<Token> tokens = tokenize("#1000-1");
+    ASSERT_EQ(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[0].text, "1000-1");
+    EXPECT_EQ(tokens[1].type, TokenType::EndOfInput);
+}
+
+TEST(LexerTest, SpacedMinusAfterReferenceIsSubtraction) {
+    std::vector<Token> tokens = tokenize("#1000 - 1");
+    ASSERT_EQ(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[0].text, "1000");
+    EXPECT_EQ(tokens[1].type, TokenType::Minus);
+    EXPECT_EQ(tokens[2].type, TokenType::Number);
+    EXPECT_EQ(tokens[2].text, "1");
+}
+
+TEST(LexerTest, ClosingParenthesisEndsReferenceBeforeMinus) {
+    std::vector<Token> tokens = tokenize("(#1000)-1");
+    ASSERT_EQ(tokens.size(), 6u);
+    EXPECT_EQ(tokens[1].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[1].text, "1000");
+    EXPECT_EQ(tokens[2].type, TokenType::RightParen);
+    EXPECT_EQ(tokens[3].type, TokenType::Minus);
+    EXPECT_EQ(tokens[4].type, TokenType::Number);
+}
+
+TEST(LexerTest, PlusAlwaysSeparatesReferences) {
+    std::vector<Token> tokens = tokenize("#1000+#2000");
+    ASSERT_EQ(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[0].text, "1000");
+    EXPECT_EQ(tokens[1].type, TokenType::Plus);
+    EXPECT_EQ(tokens[2].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[2].text, "2000");
+}
+
+TEST(LexerTest, UnspacedMinusBetweenReferencesBelongsToTheFirstCode) {
+    // "#1000-#2000" is reference "1000-" immediately followed by #2000
+    // (rejected by the parser -- see ParserTest), never a subtraction.
+    std::vector<Token> tokens = tokenize("#1000-#2000");
+    ASSERT_EQ(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[0].text, "1000-");
+    EXPECT_EQ(tokens[1].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[1].text, "2000");
+}
+
+TEST(LexerTest, SpacedMinusBetweenReferencesIsSubtraction) {
+    std::vector<Token> tokens = tokenize("#1000 -#2000");
+    ASSERT_EQ(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].text, "1000");
+    EXPECT_EQ(tokens[1].type, TokenType::Minus);
+    EXPECT_EQ(tokens[2].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[2].text, "2000");
+}
+
+TEST(LexerTest, LeadingHyphenAfterHashIsPartOfTheAccountCode) {
+    std::vector<Token> tokens = tokenize("#-1");
+    ASSERT_EQ(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::AccountReference);
+    EXPECT_EQ(tokens[0].text, "-1");
+}
+
+TEST(LexerTest, ComputedReferenceFollowsTheSameHyphenRule) {
+    std::vector<Token> tokens = tokenize("@net-1");
+    ASSERT_EQ(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::ComputedAccountReference);
+    EXPECT_EQ(tokens[0].text, "net-1");
+}
+
 TEST(LexerTest, NoWhitespaceRequiredBetweenTokens) {
     std::vector<Token> tokens = tokenize("1+2");
     ASSERT_EQ(tokens.size(), 4u);

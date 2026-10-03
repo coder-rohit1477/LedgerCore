@@ -349,3 +349,95 @@ TEST(CliEndToEndTest, PostWithDateOutsideSupportedRangeExitsWithCodeOne) {
     EXPECT_NE(result.output.find("date out of supported range"), std::string::npos);
     EXPECT_EQ(result.output.find("posted entry"), std::string::npos);
 }
+
+// ---------------------------------------------------------------------
+// Phase 15 regressions
+// ---------------------------------------------------------------------
+
+TEST(CliEndToEndTest, PostWithImpossibleCalendarDateExitsWithCodeOne) {
+    const RunResult result = runScript(
+        "account create-root --code 1000 --name Cash --type asset\n"
+        "account create-root --code 3000 --name Capital --type equity\n"
+        "post --date 2026-02-31 --description \"Not a real day\" --debit 1000:1.00 --credit 3000:1.00\n");
+
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_NE(result.output.find("invalid calendar date: '2026-02-31'"), std::string::npos);
+    EXPECT_EQ(result.output.find("posted entry"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, BalanceSheetShowsUnclosedNetIncomeAndBalancingTotal) {
+    // Assets 1,000 + 150 - 40 = 1,110.00; Liabilities 200.00 (loan);
+    // Equity 800.00; Net Income 150.00 - 40.00 = 110.00.
+    // Liabilities + Equity + Net Income = 1,110.00 == Total Assets.
+    const RunResult result = runScript(
+        "account create-root --code 1000 --name Cash --type asset\n"
+        "account create-root --code 2000 --name Loan --type liability\n"
+        "account create-root --code 3000 --name Capital --type equity\n"
+        "account create-root --code 4000 --name Sales --type revenue\n"
+        "account create-root --code 5000 --name Rent --type expense\n"
+        "post --date 2026-01-01 --description invest --debit 1000:800.00 --credit 3000:800.00\n"
+        "post --date 2026-01-02 --description borrow --debit 1000:200.00 --credit 2000:200.00\n"
+        "post --date 2026-01-03 --description sale --debit 1000:150.00 --credit 4000:150.00\n"
+        "post --date 2026-01-04 --description rent --debit 5000:40.00 --credit 1000:40.00\n"
+        "balance-sheet\n");
+
+    ASSERT_EQ(result.exitCode, 0) << result.output;
+    // Only the report itself -- not the earlier "created root account"
+    // echo lines -- is inspected below.
+    const std::size_t report = result.output.find("Balance Sheet (USD)");
+    ASSERT_NE(report, std::string::npos);
+    const std::string out = result.output.substr(report);
+    const auto lineAt = [&out](std::size_t pos) { return out.substr(pos, out.find('\n', pos) - pos); };
+    const std::size_t assets = out.find("Assets:");
+    const std::size_t liabilities = out.find("Liabilities:");
+    const std::size_t equity = out.find("Equity:");
+    const std::size_t earnings = out.find("Current-period earnings:");
+    const std::size_t netIncome = out.find("Net Income (unclosed)");
+    const std::size_t total = out.find("Liabilities + Equity + Net Income");
+    ASSERT_NE(assets, std::string::npos);
+    ASSERT_NE(liabilities, std::string::npos);
+    ASSERT_NE(equity, std::string::npos);
+    ASSERT_NE(earnings, std::string::npos);
+    ASSERT_NE(netIncome, std::string::npos);
+    ASSERT_NE(total, std::string::npos);
+    EXPECT_LT(assets, liabilities);
+    EXPECT_LT(liabilities, equity);
+    EXPECT_LT(equity, earnings);
+    EXPECT_LT(earnings, netIncome);
+    EXPECT_LT(netIncome, total);
+
+    // Section totals, then net income, then the balancing total -- which
+    // equals the Assets total exactly.
+    EXPECT_NE(out.find("1110.00 USD", assets), std::string::npos);
+    EXPECT_NE(out.find("200.00 USD", liabilities), std::string::npos);
+    EXPECT_NE(out.find("800.00 USD", equity), std::string::npos);
+    const std::string netIncomeLine = lineAt(netIncome);
+    EXPECT_NE(netIncomeLine.find(" 110.00 USD"), std::string::npos) << netIncomeLine;
+    const std::string totalLine = lineAt(total);
+    EXPECT_NE(totalLine.find("1110.00 USD"), std::string::npos) << totalLine;
+    // Revenue/Expense accounts still never appear as Balance Sheet lines.
+    EXPECT_EQ(out.find("Sales"), std::string::npos);
+    EXPECT_EQ(out.find("Rent"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, BalanceSheetAsOfShowsNetIncomeOnlyUpToCutoff) {
+    const RunResult result = runScript(
+        "account create-root --code 1000 --name Cash --type asset\n"
+        "account create-root --code 3000 --name Capital --type equity\n"
+        "account create-root --code 4000 --name Sales --type revenue\n"
+        "post --date 2026-01-01 --description invest --debit 1000:500.00 --credit 3000:500.00\n"
+        "post --date 2026-02-01 --description sale --debit 1000:30.00 --credit 4000:30.00\n"
+        "post --date 2026-03-01 --description later-sale --debit 1000:70.00 --credit 4000:70.00\n"
+        "balance-sheet --as-of 2026-03-01\n");
+
+    ASSERT_EQ(result.exitCode, 0) << result.output;
+    const std::size_t netIncome = result.output.find("Net Income (unclosed)");
+    ASSERT_NE(netIncome, std::string::npos);
+    const std::string netIncomeLine =
+        result.output.substr(netIncome, result.output.find('\n', netIncome) - netIncome);
+    EXPECT_NE(netIncomeLine.find("30.00 USD"), std::string::npos) << netIncomeLine;
+    const std::size_t total = result.output.find("Liabilities + Equity + Net Income");
+    ASSERT_NE(total, std::string::npos);
+    EXPECT_NE(result.output.find("530.00 USD", total), std::string::npos);
+    EXPECT_EQ(result.output.find("100.00 USD"), std::string::npos);
+}

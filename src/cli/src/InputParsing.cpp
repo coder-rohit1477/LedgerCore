@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <exception>
+#include <string>
 
 #include "CommandParser.h"
 #include "ledgercore/persistence/SessionStore.h"
@@ -47,6 +48,26 @@ std::int64_t daysFromCivil(std::int64_t y, std::int64_t m, std::int64_t d) noexc
     const std::int64_t doy = (153 * mp + 2) / 5 + d - 1;            // [0, 365]
     const std::int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     return era * 146097 + doe - 719468;
+}
+
+// Proleptic Gregorian leap-year rule, matching daysFromCivil() above.
+bool isLeapYear(std::int64_t year) noexcept {
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+// Precondition: 1 <= month <= 12.
+std::int64_t daysInMonth(std::int64_t year, std::int64_t month) noexcept {
+    switch (month) {
+        case 2:
+            return isLeapYear(year) ? 29 : 28;
+        case 4:
+        case 6:
+        case 9:
+        case 11:
+            return 30;
+        default:
+            return 31;
+    }
 }
 
 } // namespace
@@ -156,6 +177,13 @@ std::chrono::system_clock::time_point parseDate(const std::string& text) {
 
     if (month < 1 || month > 12 || day < 1 || day > 31) {
         rejectDate(text);
+    }
+    // daysFromCivil() would silently roll an impossible day forward
+    // (2026-02-31 -> 2026-03-03), moving the entry into a different
+    // period; reject it instead.
+    if (day > daysInMonth(year, month)) {
+        throw CliUsageError("invalid calendar date: '" + text + "' (that month has only "
+                            + std::to_string(daysInMonth(year, month)) + " days)");
     }
 
     // Range-check in whole seconds (days is at most ~3.65 million for a

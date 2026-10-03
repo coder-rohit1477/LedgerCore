@@ -90,6 +90,19 @@ TEST(EvaluatorTest, ExactAccountCodeResolutionDoesNotCrossContaminate) {
     EXPECT_EQ(evaluateFormula("#2000", resolver).asMoney(), Money::fromMajorUnits(20, 0, usd));
 }
 
+TEST(EvaluatorTest, HyphenatedAccountCodeIsReferencedAsOneAccount) {
+    // Both "1000" and "1000-1" exist: "#1000-1" names the hyphenated
+    // account, while subtraction needs whitespace ("#1000 - #1000-1").
+    Currency usd("USD");
+    MapAccountResolver resolver;
+    resolver.set("1000", Money::fromMajorUnits(10, 0, usd));
+    resolver.set("1000-1", Money::fromMajorUnits(3, 0, usd));
+
+    EXPECT_EQ(evaluateFormula("#1000-1", resolver).asMoney(), Money::fromMajorUnits(3, 0, usd));
+    EXPECT_EQ(evaluateFormula("#1000 - #1000-1", resolver).asMoney(), Money::fromMajorUnits(7, 0, usd));
+    EXPECT_EQ(evaluateFormula("#1000+#1000-1", resolver).asMoney(), Money::fromMajorUnits(13, 0, usd));
+}
+
 TEST(EvaluatorTest, UnknownAccountThrows) {
     MapAccountResolver resolver;
     EXPECT_THROW(evaluateFormula("#9999", resolver), UnknownAccountReferenceException);

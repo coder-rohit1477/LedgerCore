@@ -122,7 +122,7 @@ void executeBalanceSheet(const ParsedCommand& pc, LedgerSession& session, std::o
                                                ? trialbalance::TrialBalance::generate(session.chart(), session.ledger())
                                                : trialbalance::TrialBalance::generateAsOf(
                                                      session.chart(), session.ledger(), parseDate(pc.asOf));
-    printBalanceSheet(out, reporting::BalanceSheet::generate(tb));
+    printBalanceSheet(out, reporting::BalanceSheet::generate(tb), reporting::IncomeStatement::generate(tb));
 }
 
 trialbalance::TrialBalance buildIncomeStatementTrialBalance(const ParsedCommand& pc, LedgerSession& session) {

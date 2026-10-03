@@ -4,6 +4,7 @@
 #include <string>
 
 #include "ledgercore/domain/AccountType.h"
+#include "ledgercore/domain/Money.h"
 #include "ledgercore/reporting/ReportLine.h"
 
 namespace ledgercore::cli {
@@ -71,11 +72,21 @@ void printTrialBalance(std::ostream& out, const trialbalance::TrialBalance& tria
         << "\n";
 }
 
-void printBalanceSheet(std::ostream& out, const reporting::BalanceSheet& balanceSheet) {
+void printBalanceSheet(std::ostream& out, const reporting::BalanceSheet& balanceSheet,
+                       const reporting::IncomeStatement& incomeStatement) {
     out << "Balance Sheet (" << balanceSheet.currency().code() << ")\n";
     printSection(out, balanceSheet.assets());
     printSection(out, balanceSheet.liabilities());
     printSection(out, balanceSheet.equity());
+
+    const domain::Money& netIncome = incomeStatement.netIncome();
+    const domain::Money liabilitiesEquityAndNetIncome =
+        balanceSheet.liabilities().total() + balanceSheet.equity().total() + netIncome;
+    out << "Current-period earnings:\n";
+    out << "  " << std::left << std::setw(kCodeWidth + kNameWidth) << "Net Income (unclosed)" << std::right
+        << std::setw(kAmountWidth) << netIncome.toString() << "\n";
+    out << std::left << std::setw(kCodeWidth + kNameWidth + 2) << "Liabilities + Equity + Net Income" << std::right
+        << std::setw(kAmountWidth) << liabilitiesEquityAndNetIncome.toString() << "\n";
 }
 
 void printIncomeStatement(std::ostream& out, const reporting::IncomeStatement& incomeStatement) {

@@ -46,7 +46,10 @@ domain::Money parseAmount(const std::string& text, const domain::Currency& curre
 
 // "YYYY-MM-DD", interpreted as UTC midnight. Throws CliUsageError for any
 // shape that doesn't match (wrong length, non-digit characters, wrong
-// separators, month outside 01-12, day outside 01-31), or for a date
+// separators, month outside 01-12, day outside 01-31), for a day that
+// does not exist in that month (e.g. 2026-04-31, or 02-29 outside a
+// Gregorian leap year) -- never normalized into the following month --
+// or for a date
 // outside the persistence format's supported range, 1900-01-01 through
 // 2199-12-31 (see persistence::kMinSupportedDateEpochSeconds) -- checked
 // before any time_point conversion, never clamped. JournalEntry::date()
