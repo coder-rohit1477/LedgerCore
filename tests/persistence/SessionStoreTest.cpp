@@ -605,7 +605,7 @@ TEST(SessionStoreTest, AccountIdsAreRegeneratedNotPersisted) {
     // from a stored field.
     LoadedSession firstLoad = ledgercore::persistence::load(file.path());
     LoadedSession secondLoad = ledgercore::persistence::load(file.path());
-    for (const std::string& code : {"1000", "2000", "3000", "4000", "5000"}) {
+    for (const char* code : {"1000", "2000", "3000", "4000", "5000"}) {
         EXPECT_EQ(firstLoad.chart->findByCode(AccountCode(code))->id(),
                   secondLoad.chart->findByCode(AccountCode(code))->id());
     }

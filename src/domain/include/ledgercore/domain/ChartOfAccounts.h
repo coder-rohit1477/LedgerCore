@@ -95,10 +95,15 @@ private:
     //
     // AccountType is deliberately not a parameter here: the child always
     // inherits parent.type().
-    friend Account& posting::addChildAccount(ChartOfAccounts& chart,
-                                             const ledger::Ledger& ledger,
-                                             Account& parent,
-                                             AccountCode code,
+    //
+    // The parameter types are fully qualified on purpose: names after the
+    // qualified declarator-id posting::addChildAccount are looked up from
+    // namespace ledgercore::posting, so GCC rejects unqualified Account /
+    // AccountCode here (Clang is more lenient).
+    friend Account& posting::addChildAccount(ledgercore::domain::ChartOfAccounts& chart,
+                                             const ledgercore::ledger::Ledger& ledger,
+                                             ledgercore::domain::Account& parent,
+                                             ledgercore::domain::AccountCode code,
                                              std::string name);
 
     Account& addChildAccount(Account& parent, AccountCode code, std::string name);

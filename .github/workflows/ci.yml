@@ -1,0 +1,131 @@
+# LedgerCore CI: the same CMake/CTest commands documented in README.md,
+# run on every push to main and every pull request.
+#
+#   build-test   GCC, Release: configure, build, full CTest suite; reports
+#                compiler warnings; checks the source tree stays clean.
+#   sanitizers   GCC, Debug, LEDGERCORE_SANITIZE=ON (ASan + UBSan, via
+#                cmake/Sanitizers.cmake): configure, build, full CTest suite.
+#                GCC's sanitizer runtimes (libasan, libubsan) are hard
+#                dependencies of g++ on Ubuntu, so no extra packages are needed.
+#   clang-tidy   Static analysis of src/ with the repository's .clang-tidy.
+#
+# Any failed configure, build, test, sanitizer report, or clang-tidy
+# finding fails the run. Compiler warnings are surfaced, not made fatal.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build and test (GCC, Release)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          cmake --version
+          g++ --version
+
+      - name: Configure
+        run: cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+
+      - name: Build
+        run: cmake --build build/release --parallel "$(nproc)" 2>&1 | tee build/release-build.log
+
+      - name: Report compiler warnings
+        run: |
+          count=$(grep -c 'warning:' build/release-build.log || true)
+          echo "Compiler warnings: ${count}" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep 'warning:' build/release-build.log | sed 's/^/::warning::/' || true
+
+      - name: Test
+        run: ctest --test-dir build/release --output-on-failure --parallel "$(nproc)"
+
+      - name: Check source tree is clean
+        run: |
+          changes=$(git status --porcelain)
+          if [ -n "$changes" ]; then
+            echo "$changes"
+            echo "::error::Building or testing modified the source tree (outside the ignored build/ directory)."
+            exit 1
+          fi
+
+  sanitizers:
+    name: ASan + UBSan (GCC, Debug)
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Recent runner kernels use high ASLR entropy, which some ASan runtimes
+      # cannot map shadow memory under ("AddressSanitizer:DEADLYSIGNAL" on
+      # startup). 28 bits is the long-standing default those runtimes expect.
+      - name: Make ASLR entropy compatible with ASan
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Toolchain
+        run: |
+          cmake --version
+          g++ --version
+
+      - name: Configure
+        run: cmake -S . -B build/sanitize -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++ -DLEDGERCORE_SANITIZE=ON
+
+      - name: Build
+        run: cmake --build build/sanitize --parallel "$(nproc)"
+
+      - name: Verify ASan and UBSan are active
+        run: |
+          grep -q -- '-fsanitize=address,undefined' build/sanitize/compile_commands.json
+          symbols=$(nm build/sanitize/src/cli/ledgercore)
+          grep -q '__asan_init' <<<"$symbols"
+          grep -q '__ubsan_handle_' <<<"$symbols"
+          libs=$(ldd build/sanitize/src/cli/ledgercore)
+          grep -q 'libasan' <<<"$libs"
+          grep -q 'libubsan' <<<"$libs"
+          echo "Sanitizer flags, ASan/UBSan instrumentation, and their runtimes are present."
+
+      - name: Test
+        run: ctest --test-dir build/sanitize --output-on-failure --parallel "$(nproc)"
+
+  clang-tidy:
+    name: Static analysis (clang-tidy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          tidy=$(command -v clang-tidy-18 || command -v clang-tidy)
+          echo "CLANG_TIDY=${tidy}" >> "$GITHUB_ENV"
+          "${tidy}" --version
+
+      # Configure only: clang-tidy needs compile_commands.json, not a build.
+      - name: Configure
+        run: cmake -S . -B build/tidy -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Run clang-tidy on src/
+        run: |
+          find src -name '*.cpp' -print0 | sort -z \
+            | xargs -0 -n 1 -P "$(nproc)" "${CLANG_TIDY}" -p build/tidy --quiet

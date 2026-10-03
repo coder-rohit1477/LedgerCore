@@ -1,0 +1,28 @@
+# Static analysis gate for project sources (run by CI on src/**/*.cpp).
+# Every enabled check is fatal; the exclusions below are deliberate:
+#   bugprone-easily-swappable-parameters  pure API-style heuristic; flags
+#       most multi-parameter constructors (code/name, debit/credit, ...).
+#   performance-enum-size  suggests std::uint8_t underlying types for every
+#       small enum (AccountType, DebitCreditSide, ...): a layout
+#       micro-optimisation, not a defect.
+#   performance-unnecessary-value-param  flags by-value "sink" parameters
+#       whose callers move into them (e.g. Ledger::commit's newBalances).
+#   bugprone-exception-escape  its only finding is a false positive on
+#       Rational::ofInt (noexcept): the constructor's throw is reachable
+#       only with a negative denominator, and ofInt always passes 1.
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -performance-enum-size,
+  -performance-unnecessary-value-param
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/src/.*'
+CheckOptions:
+  # Moving a trivially-copyable value is merely redundant, not a bug;
+  # still flag std::move of const objects.
+  - key: performance-move-const-arg.CheckTriviallyCopyableMove
+    value: false

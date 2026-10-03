@@ -66,9 +66,12 @@ void executeAccountCreateChild(const ParsedCommand& pc, LedgerSession& session, 
     const domain::AccountCode code = parseAccountCode(pc.code);
     // Ledger-aware: rejects a parent that already has posting history,
     // which plain ChartOfAccounts::addChildAccount() cannot know about.
-    const domain::Account& account =
-        posting::addChildAccount(session.chart(), session.ledger(), *parent, code, pc.name);
-    out << "created child account " << account.code().value() << " \"" << account.name() << "\" under "
+    // Held by pointer: the returned Account lives in the chart, but GCC's
+    // -Wdangling-reference heuristic flags binding a reference returned
+    // from a call that takes by-value temporaries (code, name).
+    const domain::Account* const account =
+        &posting::addChildAccount(session.chart(), session.ledger(), *parent, code, pc.name);
+    out << "created child account " << account->code().value() << " \"" << account->name() << "\" under "
         << parent->code().value() << "\n";
 }
 

@@ -1,5 +1,7 @@
 # LedgerCore
 
+[![CI](https://github.com/coder-rohit1477/LedgerCore/actions/workflows/ci.yml/badge.svg)](https://github.com/coder-rohit1477/LedgerCore/actions/workflows/ci.yml)
+
 A modular C++17 double-entry accounting engine built around exact monetary arithmetic, immutable domain objects, explicit accounting invariants, a strictly layered architecture, deterministic reporting, and a test suite mapped directly to accounting properties.
 
 ## 1. Overview
@@ -287,6 +289,23 @@ Any UB report aborts the offending test process, so it surfaces as a CTest failu
 
 Journal entry dates are supported from 1900-01-01 up to (not including) 2200-01-01 UTC — the range the snapshot format's nanosecond timestamps can represent with margin. The CLI and persistence reject dates outside it rather than clamping them.
 
+### Continuous Integration
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push to `main` and every pull request, on `ubuntu-24.04`. Any configure, build, or test failure, sanitizer report, or clang-tidy finding fails the run; compiler warnings are reported (count in the job summary, each as an annotation) but not made fatal.
+
+| Job | Toolchain / configuration | Checks |
+|---|---|---|
+| Build and test | GCC, `Release` | configure, build, full CTest suite, warning count, source tree left clean |
+| ASan + UBSan | GCC, `Debug`, `-DLEDGERCORE_SANITIZE=ON` | confirms both sanitizers are compiled in and linked, then the full CTest suite (with LeakSanitizer) |
+| Static analysis | clang-tidy 18 with [`.clang-tidy`](.clang-tidy) | every `src/**/*.cpp` file and project headers; any finding is an error |
+
+To reproduce locally, use the build and sanitizer commands above (add `-DCMAKE_BUILD_TYPE=Release` or `Debug` to match CI), and for static analysis:
+
+```sh
+cmake -S . -B build-tidy -DCMAKE_CXX_COMPILER=clang++
+find src -name '*.cpp' | xargs clang-tidy -p build-tidy --quiet
+```
+
 ### Running the CLI
 
 The executable is built at `build/src/cli/ledgercore`. A new session uses USD; a loaded snapshot keeps the currency it was saved with.
@@ -315,6 +334,8 @@ In the REPL, a failing command prints `error: ...` and the session continues. In
 
 ```
 LedgerCore/
+├── .github/workflows/
+│   └── ci.yml
 ├── cmake/
 │   ├── CompilerWarnings.cmake
 │   └── Sanitizers.cmake
@@ -339,6 +360,7 @@ LedgerCore/
 │   ├── persistence/
 │   ├── cli/
 │   └── smoke_test.cpp
+├── .clang-tidy
 ├── CMakeLists.txt
 └── README.md
 ```
