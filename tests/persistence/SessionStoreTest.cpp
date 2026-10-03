@@ -2051,6 +2051,41 @@ TEST(SessionStoreTest, MutatedSnapshotsFailCleanlyOrLoad) {
 }
 
 // ---------------------------------------------------------------------
+// Closing-entry cap on load
+// ---------------------------------------------------------------------
+
+namespace {
+
+// A v2 snapshot of `pairs` (sale, complete closing entry) pairs -- every
+// closing entry valid; the shape that made unbounded loads quadratic.
+std::string alternatingClosingSnapshot(std::size_t pairs) {
+    std::string text = "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\nACCOUNT ROOT 1000 Asset \"Cash\"\n"
+                       "ACCOUNT ROOT 3100 Equity \"RE\"\nACCOUNT ROOT 4000 Revenue \"Sales\"\n";
+    const long long base = 1798761600LL * 1000000000LL;
+    for (std::size_t i = 0; i < pairs; ++i) {
+        const long long at = base + static_cast<long long>(i) * 2000000000LL;
+        text += "ENTRY " + std::to_string(at) + " \"s\"\n  DEBIT 1000 100\n  CREDIT 4000 100\n";
+        text += "CLOSING " + std::to_string(at + 1000000000LL) + " \"c\"\n  DEBIT 4000 100\n  CREDIT 3100 100\n";
+    }
+    return text;
+}
+
+} // namespace
+
+TEST(SessionStoreTest, SnapshotWithTheMaximumNumberOfClosingEntriesLoads) {
+    const ScopedTempFile file(uniqueTempPath("closing_cap_ok"));
+    writeRawFile(file.path(), alternatingClosingSnapshot(ledgercore::posting::kMaxClosingEntries));
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    EXPECT_EQ(loaded.ledger->closingEntryCount(), ledgercore::posting::kMaxClosingEntries);
+}
+
+TEST(SessionStoreTest, SnapshotBeyondTheClosingEntryCapIsRejectedCleanly) {
+    const ScopedTempFile file(uniqueTempPath("closing_cap_exceeded"));
+    writeRawFile(file.path(), alternatingClosingSnapshot(ledgercore::posting::kMaxClosingEntries + 1));
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::posting::ClosingEntryLimitExceededException);
+}
+
+// ---------------------------------------------------------------------
 // Property-style tests
 // ---------------------------------------------------------------------
 

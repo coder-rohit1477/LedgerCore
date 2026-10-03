@@ -759,3 +759,33 @@ TEST(CliEndToEndTest, AdversariallyDeepFormulaIsRejectedWithAccountingExitCode) 
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_NE(result.output.find("nested more than 128 levels deep"), std::string::npos);
 }
+
+TEST(CliEndToEndTest, SnapshotBeyondTheClosingEntryCapFailsWithAccountingExitCode) {
+    const std::string snapshotPath = uniqueTempPath("closing_cap_snapshot");
+    {
+        std::ofstream out(snapshotPath);
+        out << "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\nACCOUNT ROOT 1000 Asset \"Cash\"\n"
+               "ACCOUNT ROOT 3100 Equity \"RE\"\nACCOUNT ROOT 4000 Revenue \"Sales\"\n";
+        const long long base = 1798761600LL * 1000000000LL;
+        for (long long i = 0; i < 1001; ++i) {
+            out << "ENTRY " << base + i * 2000000000LL << " \"s\"\n  DEBIT 1000 100\n  CREDIT 4000 100\n";
+            out << "CLOSING " << base + i * 2000000000LL + 1000000000LL << " \"c\"\n  DEBIT 4000 100\n  CREDIT 3100 100\n";
+        }
+    }
+    const RunResult result = runScript("load " + snapshotPath + "\n");
+    std::remove(snapshotPath.c_str());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_NE(result.output.find("A Ledger may hold at most 1000 closing entries"), std::string::npos) << result.output;
+}
+
+TEST(CliEndToEndTest, ComputedEvaluationBudgetFailureUsesAccountingExitCode) {
+    std::string script = "account create-root --code 1000 --name Cash --type asset\n"
+                         "computed define --name C0 --formula \"#1000\"\n";
+    for (int i = 1; i <= 300; ++i) {
+        script += "computed define --name C" + std::to_string(i) + " --formula \"@C" + std::to_string(i - 1) + "\"\n";
+    }
+    script += "computed eval C300\n";
+    const RunResult result = runScript(script);
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_NE(result.output.find("evaluation limit of 256 levels"), std::string::npos);
+}

@@ -165,6 +165,10 @@ ledger::PostingId post(const domain::JournalEntry& entry,
 
     if (entry.isClosing()) {
         ensureClosingEntryShape(resolvedAccounts);
+        if (ledger.closingEntryCount() >= kMaxClosingEntries) {
+            throw ClosingEntryLimitExceededException("A Ledger may hold at most " + std::to_string(kMaxClosingEntries)
+                                                     + " closing entries");
+        }
     }
 
     // Phase 2: compute. Aggregate duplicate AccountId lines into one net

@@ -13,8 +13,15 @@ Account& ChartOfAccounts::addRootAccount(AccountCode code, std::string name, Acc
     const AccountId id = nextAccountId();
     auto account = std::unique_ptr<Account>(new Account(id, std::move(code), std::move(name), type, nullptr));
     Account* raw = account.get();
-    registerAccount(raw);
+    // Store first, then index, undoing the store if indexing fails: the
+    // indexes never point at an Account the chart does not own.
     topLevelAccounts_.push_back(std::move(account));
+    try {
+        registerAccount(raw);
+    } catch (...) {
+        topLevelAccounts_.pop_back();
+        throw;
+    }
     return *raw;
 }
 
@@ -52,7 +59,12 @@ Account& ChartOfAccounts::addChildAccount(Account& parent, AccountCode code, std
 
     const AccountId id = nextAccountId();
     Account* child = parent.addChild(id, std::move(code), std::move(name));
-    registerAccount(child);
+    try {
+        registerAccount(child);
+    } catch (...) {
+        parent.children_.pop_back();  // parent is left exactly as before
+        throw;
+    }
     return *child;
 }
 
@@ -107,9 +119,15 @@ AccountId ChartOfAccounts::nextAccountId() {
     return AccountId(nextId_++);
 }
 
+// All-or-nothing: either both indexes gain the account or neither does.
 void ChartOfAccounts::registerAccount(Account* account) {
     codeIndex_.emplace(account->code().value(), account);
-    idIndex_.emplace(account->id().value(), account);
+    try {
+        idIndex_.emplace(account->id().value(), account);
+    } catch (...) {
+        codeIndex_.erase(account->code().value());
+        throw;
+    }
 }
 
 void ChartOfAccounts::ensureCodeIsUnique(const AccountCode& code) const {

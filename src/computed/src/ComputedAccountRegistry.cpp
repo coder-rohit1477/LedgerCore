@@ -1,5 +1,6 @@
 #include "ledgercore/computed/ComputedAccountRegistry.h"
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -138,10 +139,18 @@ const ComputedAccountDefinition& ComputedAccountRegistry::define(formula::Comput
         throw ComputedAccountAlreadyDefinedException("Computed account already defined: " + key);
     }
 
+    // Every allocation happens before the first visible change, and the
+    // final append cannot throw (capacity reserved, string moved), so a
+    // definition is either fully registered -- found by find() and listed
+    // by definitions() -- or not at all.
+    std::string orderKey = key;
+    if (insertionOrder_.size() == insertionOrder_.capacity()) {
+        insertionOrder_.reserve(std::max<std::size_t>(8, insertionOrder_.capacity() * 2));
+    }
     auto definition = std::make_unique<ComputedAccountDefinition>(std::move(name), std::move(formulaSource));
     ComputedAccountDefinition* raw = definition.get();
     definitionsByName_.emplace(key, std::move(definition));
-    insertionOrder_.push_back(key);
+    insertionOrder_.push_back(std::move(orderKey));
     return *raw;
 }
 

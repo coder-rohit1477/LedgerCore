@@ -16,3 +16,9 @@ target_link_libraries(ledgercore_domain
     PRIVATE
         ledgercore_warnings
 )
+
+# The public headers use C++17. Every LedgerCore library links
+# ledgercore_domain PUBLIC, so this requirement reaches any target that
+# links a LedgerCore library -- including projects that pull LedgerCore in
+# with add_subdirectory()/FetchContent and use another default standard.
+target_compile_features(ledgercore_domain PUBLIC cxx_std_17)

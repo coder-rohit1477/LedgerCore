@@ -48,6 +48,7 @@ using ledgercore::domain::ForeignAccountException;
 using ledgercore::domain::InvalidAccountException;
 using ledgercore::posting::addChildAccount;
 using ledgercore::posting::ClosedPeriodPostingException;
+using ledgercore::posting::ClosingEntryLimitExceededException;
 using ledgercore::posting::InvalidClosingEntryException;
 using ledgercore::posting::InvalidPostingTargetException;
 using ledgercore::posting::post;
@@ -1216,4 +1217,37 @@ TEST(PostingEngineTest, IncompleteClosingErrorNamesTheLowestCodeAccountRegardles
                       "account 4000 would be left at 60.00 USD");
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Closing-entry cap (kMaxClosingEntries)
+// ---------------------------------------------------------------------
+
+TEST(PostingEngineTest, LedgerAcceptsExactlyTheMaximumNumberOfClosingEntries) {
+    OpenYear y;  // Sales 100 open from day 10
+    const std::size_t limit = ledgercore::posting::kMaxClosingEntries;
+    for (std::size_t i = 0; i < limit; ++i) {
+        const int base = 20 + 2 * static_cast<int>(i);
+        if (i > 0) {
+            y.postStandard(day(base), y.cash, y.sales, 1);
+        }
+        const std::int64_t open = i == 0 ? 100 : 1;
+        post(JournalEntry::createClosing(day(base + 1), "Close", {y.dr(y.sales, open), y.cr(y.retained, open)}),
+             y.chart, y.ledger);
+    }
+    EXPECT_EQ(y.ledger.closingEntryCount(), limit);
+
+    // One more period of activity, then the (limit + 1)th close: rejected
+    // before any history replay, with nothing changed.
+    const int base = 20 + 2 * static_cast<int>(limit);
+    y.postStandard(day(base), y.cash, y.sales, 1);
+    const std::size_t historyBefore = y.historySize();
+    EXPECT_THROW(post(JournalEntry::createClosing(day(base + 1), "Close", {y.dr(y.sales, 1), y.cr(y.retained, 1)}),
+                      y.chart, y.ledger),
+                 ClosingEntryLimitExceededException);
+    EXPECT_EQ(y.historySize(), historyBefore);
+    EXPECT_EQ(y.ledger.closingEntryCount(), limit);
+    EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(1, 0, y.usd));
+    // Standard postings are unaffected by the cap.
+    y.postStandard(day(base + 2), y.cash, y.sales, 1);
 }

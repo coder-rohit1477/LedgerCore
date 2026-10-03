@@ -178,7 +178,7 @@ cli (ledgercore executable) ──► persistence ──► posting, computed (�
 | `reporting` | Balance Sheet and Income Statement, derived from an already-generated Trial Balance | `domain`, `trialbalance` |
 | `closing` | Closing entries: closes Revenue/Expense balances into a retained-earnings Equity account through one posted closing entry | `domain`, `ledger`, `posting`, `trialbalance` |
 | `journalquery` | Read-only, deterministic filtering of posted journal history (date range, account, entry kind) | `domain`, `ledger` |
-| `persistence` | Versioned text snapshot save/load of a whole session (chart, journal history, computed definitions), replaying history through `posting` | `domain`, `ledger`, `posting`, `computed` |
+| `persistence` | Versioned text snapshot save/load of a whole session (chart, journal history, computed definitions, accounting periods), replaying history through `posting` | `domain`, `ledger`, `posting`, `computed`, `formula` |
 | `cli` | The `ledgercore` executable: REPL and `--script` modes, input parsing, report formatting, session ownership | `persistence`, `reporting` (and the rest transitively) |
 
 ## 5. Accounting Model
@@ -328,28 +328,30 @@ The engine bounds every recursion that input can drive, so a hand-made snapshot 
 | `ChartOfAccounts::kMaxDepth` | 1000 levels | account-tree depth (checked when a child is attached, live or on load) | `ChartDepthExceededException` |
 | `formula::kMaxFormulaDepth` | 128 levels | a formula's syntax-tree depth and parenthesis/unary nesting | `FormulaSyntaxException` |
 | `ComputedAccountRegistry::kMaxEvaluationDepth` | 256 levels | the summed formula depth along a chain of nested `@name` references | `ComputedAccountDepthExceededException` |
+| `posting::kMaxClosingEntries` | 1000 closing entries | closing entries one Ledger may hold (each one's validation replays history) | `ClosingEntryLimitExceededException` |
 
 Tree traversals (trial balance, saving, account listings) and chart teardown are iterative. The formula limits were sized by measuring worst-case stack use, including under AddressSanitizer.
 
-Costs worth knowing: posting, `hasPostingHistory`, and cumulative trial balances are O(1)/O(accounts) per call; as-of/period trial balances, journal queries, and closing are linear scans of history. Validating a closing entry replays history (O(history)), so a ledger with many closing entries pays O(closings × history) when posting them and again on load — about 1.2 s / 0.5 s for 1,000 closings over 100,000 entries — which is negligible for periodic closes.
+Costs worth knowing: posting, `hasPostingHistory`, and cumulative trial balances are O(1)/O(accounts) per call; as-of/period trial balances, journal queries, and closing are linear scans of history. Validating a closing entry replays history (O(history)), so a ledger with many closing entries pays O(closings × history) when posting them and again on load — about 1.2 s / 0.5 s for 1,000 closings over 100,000 entries. The closing-entry cap keeps that bounded: a snapshot can force at most 1,000 history replays, so load time stays proportional to file size instead of growing quadratically. All limits are LedgerCore errors, so the CLI reports them with exit code `2`.
 
 ## 8. Testing
 
-**723 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
+**733 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
 
 | Module | Tests |
 |---|---|
 | domain (Account, ChartOfAccounts, Money, JournalEntry, NormalBalance, Period, date formatting, checked arithmetic) | 138 |
 | ledger | 18 |
-| posting | 58 |
+| posting | 59 |
 | formula (Lexer, Rational, Parser, Evaluator) | 118 |
 | computed | 44 |
 | trialbalance | 54 |
 | reporting | 30 |
 | closing | 40 |
 | journalquery | 22 |
-| persistence | 82 |
-| cli (input parsing, command parsing, session, process-level end-to-end) | 118 |
+| persistence | 84 |
+| exception safety (allocation-failure injection) | 5 |
+| cli (input parsing, command parsing, session, process-level end-to-end) | 120 |
 | smoke | 1 |
 
 The suite mixes unit, integration, and property-style tests, targeted at the invariants the domain actually cares about rather than at raw line coverage:
@@ -362,6 +364,7 @@ The suite mixes unit, integration, and property-style tests, targeted at the inv
 - period boundary behavior (`[start, end)` edges, adjacent-period tiling, backdated entries)
 - reporting equations (Balance Sheet / Income Statement identities hold after randomized posting sequences)
 - accounting periods (overlap rules, one-way lifecycle, `[start, end)` lock boundaries, atomic rejection of backdated postings, report invariance under locking, v3 final-state persistence and hand-edited period records)
+- exception safety: every mutating engine operation (posting, closing, adding accounts, defining computed accounts) re-run with each of its allocations failing in turn, checking that nothing observable changed
 - adversarial input: deep charts, deep formulas and dependency chains at and beyond every limit, and seeded fuzz-smoke tests that corrupt valid snapshots and feed random text to the formula and CLI parsers (no crash, only LedgerCore errors — under ASan/UBSan in CI)
 - journal history queries (each filter and their combination, `[start, end)` boundaries, posting-order determinism, same-date ordering, exact Money/currency, read-only behaviour, identical results across save/load for v1/v2/v3)
 - closing entries (sign correctness for every account type, net income/loss, contra balances, invalid targets, atomic failure, repeated and multi-year closing, report consistency before and after closing)
@@ -373,7 +376,7 @@ Code coverage is not currently measured by this repository, so no coverage perce
 
 ## 9. Build & Test
 
-Requires **CMake >= 3.20** and a **C++17** compiler. GoogleTest (v1.14.0) is fetched automatically via CMake `FetchContent` — no manual GoogleTest installation is needed.
+Requires **CMake >= 3.20** and a **C++17** compiler. Tested platforms: Linux with GCC 13 (CI also runs clang-tidy 18) and macOS with AppleClang. Windows is not currently supported — the end-to-end tests use POSIX process and file APIs. Configuring with tests enabled downloads GoogleTest (v1.14.0) via CMake `FetchContent`, so the first configure needs network access; no manual GoogleTest installation is needed.
 
 ```sh
 cmake -S . -B build
@@ -390,6 +393,20 @@ ctest --test-dir build-sanitize --output-on-failure
 ```
 
 Any UB report aborts the offending test process, so it surfaces as a CTest failure.
+
+Build options:
+
+| Option | Default | Effect |
+|---|---|---|
+| `LEDGERCORE_BUILD_TESTS` | `ON` when LedgerCore is the top-level project, `OFF` when included by another project | builds the test suite (and fetches GoogleTest) |
+| `LEDGERCORE_SANITIZE` | `OFF` | builds everything with ASan + UBSan |
+
+`cmake --install build` installs the `ledgercore` executable (to `bin/` under the install prefix). The engine libraries are not installed or exported as a CMake package; a C++ project uses them in-tree, linking the module targets it needs (each one carries its own include path and dependencies):
+
+```cmake
+add_subdirectory(LedgerCore)   # or FetchContent; tests are off by default here
+target_link_libraries(my_app PRIVATE ledgercore_posting ledgercore_reporting)
+```
 
 Journal entry dates are supported from 1900-01-01 up to (not including) 2200-01-01 UTC — the range the snapshot format's nanosecond timestamps can represent with margin. The CLI and persistence reject dates outside it rather than clamping them.
 
@@ -492,6 +509,7 @@ LedgerCore/
 │   ├── closing/
 │   ├── journalquery/
 │   ├── persistence/
+│   ├── exceptionsafety/
 │   ├── cli/
 │   └── smoke_test.cpp
 ├── .clang-tidy
@@ -515,9 +533,9 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 ## 12. Current Status
 
-Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
+Version **1.0.0**. Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
-- 723 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
+- 733 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 
@@ -528,6 +546,9 @@ This is not a claim of production readiness — see [Overview](#1-overview).
 Reasonable, currently-unimplemented future work:
 
 - Reopening a closed accounting period (deliberately unsupported today: `Open → Closed` is one-way)
+- Installing and exporting the engine libraries as a CMake package (today they are consumed in-tree)
+- Windows support (the engine is portable C++17; the end-to-end test harness is POSIX-only)
+- Incremental closing-entry validation, which would remove the need for the closing-entry cap
 - Coverage-guided fuzzing (libFuzzer) of the snapshot, formula, and CLI parsers; today they are covered by seeded fuzz-smoke tests
 - Richer fiscal-period abstractions (e.g. named fiscal calendars) built on top of the existing `Period` primitive
 - Additional reporting capabilities (e.g. comparative periods, cash flow statement)

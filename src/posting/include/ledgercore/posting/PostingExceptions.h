@@ -43,6 +43,13 @@ public:
     explicit ClosedPeriodPostingException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown by post() for a closing entry when the Ledger already holds
+// posting::kMaxClosingEntries closing entries.
+class ClosingEntryLimitExceededException : public ledgercore::LedgerException {
+public:
+    explicit ClosingEntryLimitExceededException(const std::string& message) : LedgerException(message) {}
+};
+
 // Thrown by posting::addChildAccount() when the would-be parent already
 // has posting history in the Ledger: giving it a child would turn a
 // posted leaf into a group account, which can no longer be a posting

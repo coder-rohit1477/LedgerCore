@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "ledgercore/domain/Account.h"
@@ -10,6 +11,15 @@
 #include "ledgercore/ledger/PostingId.h"
 
 namespace ledgercore::posting {
+
+// The most closing entries (JournalEntryKind::Closing) one Ledger accepts --
+// monthly closes for 83 years. Validating a closing entry replays the
+// Ledger's history, so without a bound a snapshot made of many small valid
+// closing entries would cost O(closings x history) to load; with it, the
+// worst case is at most this many history scans. post() rejects the next
+// closing entry once the Ledger holds this many
+// (ClosingEntryLimitExceededException), live or during load.
+inline constexpr std::size_t kMaxClosingEntries = 1000;
 
 // The Posting Engine: the only component aware of both JournalEntry and
 // ChartOfAccounts. Applies a validated, balanced JournalEntry to a
@@ -37,6 +47,9 @@ namespace ledgercore::posting {
 //   - with the entry applied, every Revenue/Expense account in chart has a
 //     zero balance counting all posted entries dated before
 //     entry.closingCutoff().
+// A closing entry is also rejected (ClosingEntryLimitExceededException) if
+// ledger already holds kMaxClosingEntries closing entries -- checked before
+// the history replay the completeness rule needs.
 // These leave no freedom beyond the choice of Equity account, so a
 // Closing entry -- posted live or replayed from a snapshot -- is always
 // one closing::closeTemporaryAccounts() could have produced.

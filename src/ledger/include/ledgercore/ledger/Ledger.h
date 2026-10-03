@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 #include <utility>
@@ -76,7 +77,14 @@ public:
     // accounts that appear in postedEntries() (see Ledger.cpp).
     bool hasPostingHistory(domain::AccountId accountId) const noexcept;
 
+    // Append-only, in posting order. The vector reference itself stays
+    // valid for the Ledger's lifetime, but references, pointers, or
+    // iterators to its *elements* are invalidated by the next posting
+    // (the vector may reallocate) -- copy what must outlive one.
     const std::vector<PostedJournalEntry>& postedEntries() const noexcept { return postedEntries_; }
+
+    // How many posted entries are JournalEntryKind::Closing. O(1).
+    std::size_t closingEntryCount() const noexcept { return closingEntryCount_; }
 
     // Accounting periods: metadata restricting *which business dates* this
     // Ledger accepts new postings for. They never change a balance or a
@@ -99,7 +107,8 @@ public:
     // Every defined period, ordered by ascending start (deterministic).
     const std::vector<AccountingPeriod>& accountingPeriods() const noexcept { return accountingPeriods_; }
 
-    // The Closed period whose [start, end) contains date, or nullptr.
+    // The Closed period whose [start, end) contains date, or nullptr. The
+    // pointer is invalidated by the next defineAccountingPeriod().
     const AccountingPeriod* closedPeriodContaining(std::chrono::system_clock::time_point date) const noexcept;
 
 private:
@@ -109,10 +118,11 @@ private:
 
     // Applies already-computed, already-checked new balances and records
     // exactly one PostedJournalEntry. By the time this runs, every
-    // fallible step (account existence, posting target, currency match,
-    // Money overflow) has already succeeded in posting::post(), so nothing
-    // here can fail for a business reason -- there is no rollback to
-    // implement.
+    // business-rule check (account existence, posting target, currency
+    // match, Money overflow, periods, closing rules) has already succeeded
+    // in posting::post(), so nothing here can fail for a business reason;
+    // against allocation failure it gives the strong guarantee (see
+    // Ledger.cpp).
     PostingId commit(domain::JournalEntry entry, std::vector<std::pair<domain::AccountId, domain::Money>> newBalances);
 
     domain::Currency currency_;
@@ -120,6 +130,7 @@ private:
     std::vector<PostedJournalEntry> postedEntries_;
     std::vector<AccountingPeriod> accountingPeriods_;
     std::uint64_t nextPostingId_ = 1;
+    std::size_t closingEntryCount_ = 0;
 };
 
 } // namespace ledgercore::ledger

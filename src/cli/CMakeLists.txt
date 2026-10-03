@@ -8,6 +8,10 @@ add_executable(ledgercore_cli
 
 set_target_properties(ledgercore_cli PROPERTIES OUTPUT_NAME ledgercore)
 
+# `cmake --install` installs the ledgercore executable. The libraries are
+# consumed in-tree (add_subdirectory()/FetchContent); see README.
+install(TARGETS ledgercore_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 # domain, ledger, formula, and trialbalance are deliberately not listed
 # here even though the CLI uses their types directly: each is already a
 # PUBLIC dependency of at least one target below (persistence ->

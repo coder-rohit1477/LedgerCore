@@ -8,6 +8,10 @@ FetchContent_Declare(
 
 # Windows: keep GoogleTest's runtime library choice consistent with this project.
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+# GoogleTest is a test-only dependency: never install it with LedgerCore,
+# and skip GMock, which the tests do not use.
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(googletest)
 
@@ -35,4 +39,5 @@ add_subdirectory(reporting)
 add_subdirectory(closing)
 add_subdirectory(journalquery)
 add_subdirectory(persistence)
+add_subdirectory(exceptionsafety)
 add_subdirectory(cli)
