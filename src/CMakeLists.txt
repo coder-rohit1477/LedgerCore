@@ -1,5 +1,5 @@
 # Module libraries (domain, ledger, posting, trialbalance, formula,
-# computed, reporting, closing, persistence, cli) are added here one at a time,
+# computed, reporting, closing, journalquery, persistence, cli) are added here one at a time,
 # each in its own phase, via add_subdirectory().
 
 add_subdirectory(domain)
@@ -10,5 +10,6 @@ add_subdirectory(formula)
 add_subdirectory(computed)
 add_subdirectory(reporting)
 add_subdirectory(closing)
+add_subdirectory(journalquery)
 add_subdirectory(persistence)
 add_subdirectory(cli)

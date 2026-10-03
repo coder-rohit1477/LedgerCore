@@ -35,6 +35,7 @@
 #include "ledgercore/domain/Period.h"
 #include "ledgercore/formula/ComputedAccountName.h"
 #include "ledgercore/formula/FormulaExceptions.h"
+#include "ledgercore/journalquery/JournalQuery.h"
 #include "ledgercore/ledger/Ledger.h"
 #include "ledgercore/persistence/PersistenceExceptions.h"
 #include "ledgercore/persistence/SessionStore.h"
@@ -1823,6 +1824,90 @@ TEST(SessionStoreTest, MalformedPeriodAndMalformedJournalReportTheFirstProblemIn
                               "ENTRY " + nanosText(day(10)) + " \"Bad\"\n  DEBIT 1000 100\n  CREDIT 4000 99\n"
                               "PERIOD " + nanosText(day(0)) + " nope OPEN\n");
     EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::domain::UnbalancedJournalEntryException);
+}
+
+// ---------------------------------------------------------------------
+// Journal queries are unaffected by save/load (Phase 19)
+// ---------------------------------------------------------------------
+
+namespace {
+
+// A query result rendered with account *codes* (AccountIds are
+// regenerated on load), so live and reloaded results compare directly.
+std::vector<std::string> describeQuery(const ChartOfAccounts& chart, const Ledger& ledger,
+                                       const ledgercore::journalquery::JournalQuery& query) {
+    std::vector<std::string> rendered;
+    for (const ledgercore::ledger::PostedJournalEntry& posted :
+         ledgercore::journalquery::findJournalEntries(ledger, query)) {
+        const JournalEntry& entry = posted.entry();
+        std::string text = std::to_string(posted.id().value()) + "|" + nanosText(entry.date()) + "|"
+                           + entry.description() + "|" + (entry.isClosing() ? "closing" : "standard");
+        for (const JournalEntryLine& line : entry.lines()) {
+            text += "|" + std::string(line.isDebit() ? "D " : "C ") + chart.findById(line.accountId())->code().value()
+                    + " " + line.amount().toString();
+        }
+        rendered.push_back(text);
+    }
+    return rendered;
+}
+
+// Runs the same queries against the live session and a reloaded copy.
+void expectQueriesSurviveReload(const ChartOfAccounts& chart, const Ledger& ledger, const std::string& expectedHeader) {
+    using ledgercore::journalquery::EntryKindFilter;
+    using ledgercore::journalquery::JournalQuery;
+    ComputedAccountRegistry registry;
+    const ScopedTempFile file(uniqueTempPath("journal_query_reload"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    EXPECT_EQ(readRawFile(file.path()).rfind(expectedHeader, 0), 0u);
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+
+    const AccountId liveCash = chart.findByCode(AccountCode("1000"))->id();
+    const AccountId loadedCash = loaded.chart->findByCode(AccountCode("1000"))->id();
+    const Period firstYear(day(0), day(365));
+    EXPECT_EQ(describeQuery(chart, ledger, JournalQuery()),
+              describeQuery(*loaded.chart, *loaded.ledger, JournalQuery()));
+    EXPECT_EQ(describeQuery(chart, ledger, JournalQuery().withDateRange(firstYear)),
+              describeQuery(*loaded.chart, *loaded.ledger, JournalQuery().withDateRange(firstYear)));
+    EXPECT_EQ(describeQuery(chart, ledger, JournalQuery().withAccount(liveCash)),
+              describeQuery(*loaded.chart, *loaded.ledger, JournalQuery().withAccount(loadedCash)));
+    for (EntryKindFilter kind : {EntryKindFilter::StandardOnly, EntryKindFilter::ClosingOnly}) {
+        EXPECT_EQ(describeQuery(chart, ledger, JournalQuery().withKind(kind)),
+                  describeQuery(*loaded.chart, *loaded.ledger, JournalQuery().withKind(kind)));
+    }
+    EXPECT_FALSE(describeQuery(*loaded.chart, *loaded.ledger, JournalQuery()).empty());
+}
+
+} // namespace
+
+TEST(SessionStoreTest, JournalQueriesAreIdenticalAfterReloadForEachFormatVersion) {
+    {
+        SCOPED_TRACE("v1: standard entries only");
+        Currency usd("USD");
+        ChartOfAccounts chart;
+        StandardAccounts accounts = setUpStandardChart(chart);
+        Ledger ledger(usd);
+        post(JournalEntry::create(day(10), "Sale",
+                                   {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(12, 34, usd)),
+                                    JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(12, 34, usd))}),
+             chart, ledger);
+        post(JournalEntry::create(day(5), "Backdated supplies",
+                                   {JournalEntryLine::debit(accounts.expense, Money::fromMajorUnits(2, 0, usd)),
+                                    JournalEntryLine::credit(accounts.cash, Money::fromMajorUnits(2, 0, usd))}),
+             chart, ledger);
+        expectQueriesSurviveReload(chart, ledger, "LEDGERCORE-SNAPSHOT v1\n");
+    }
+    {
+        SCOPED_TRACE("v2: with a closing entry");
+        ChartOfAccounts chart;
+        Ledger ledger(Currency("USD"));
+        setUpClosedYear(chart, ledger);
+        expectQueriesSurviveReload(chart, ledger, "LEDGERCORE-SNAPSHOT v2\n");
+    }
+    {
+        SCOPED_TRACE("v3: with accounting periods");
+        PeriodSession session;
+        expectQueriesSurviveReload(session.chart, session.ledger, "LEDGERCORE-SNAPSHOT v3\n");
+    }
 }
 
 // ---------------------------------------------------------------------

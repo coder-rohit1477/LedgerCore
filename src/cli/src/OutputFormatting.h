@@ -1,10 +1,13 @@
 #pragma once
 
 #include <ostream>
+#include <vector>
 
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/ChartOfAccounts.h"
+#include "ledgercore/domain/Currency.h"
 #include "ledgercore/ledger/Ledger.h"
+#include "ledgercore/ledger/PostedJournalEntry.h"
 #include "ledgercore/reporting/BalanceSheet.h"
 #include "ledgercore/reporting/IncomeStatement.h"
 #include "ledgercore/trialbalance/TrialBalance.h"
@@ -37,6 +40,14 @@ void printIncomeStatement(std::ostream& out, const reporting::IncomeStatement& i
 void printAccountList(std::ostream& out, const domain::ChartOfAccounts& chart, bool tree);
 
 void printAccountDetail(std::ostream& out, const domain::Account& account);
+
+// "Journal (<currency>): N entries", then for each entry, in the given
+// order, a header "#<posting id>  <date>  standard|closing  \"<description>\""
+// followed by its lines in recorded order: "  DEBIT|CREDIT  <code> <name>
+// <amount>". Account code/name come from chart (the CLI's presentation
+// concern); the entries themselves are a journalquery result.
+void printJournal(std::ostream& out, const std::vector<ledger::PostedJournalEntry>& entries,
+                  const domain::ChartOfAccounts& chart, const domain::Currency& currency);
 
 // One line per accounting period, in the Ledger's own order (ascending
 // start): "<start>  <end>  open|closed", end exclusive.

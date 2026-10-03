@@ -39,6 +39,7 @@ enum class CommandKind {
     PeriodCreate,
     PeriodClose,
     PeriodList,
+    Journal,
     Exit
 };
 
@@ -73,7 +74,7 @@ struct ParsedCommand {
     std::string description;
     std::vector<PostingLineArg> lines;
 
-    // trial-balance / balance-sheet / income-statement
+    // trial-balance / balance-sheet / income-statement / journal
     std::string asOf;
     std::string from;
     std::string to;
@@ -91,6 +92,10 @@ struct ParsedCommand {
     // period create / close
     std::string periodStart;
     std::string periodEnd;
+
+    // journal (also uses from/to, and code for --account)
+    bool standardOnly = false;
+    bool closingOnly = false;
 };
 
 // Splits one input line into tokens on whitespace, with basic

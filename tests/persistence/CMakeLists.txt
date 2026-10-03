@@ -12,6 +12,7 @@ target_link_libraries(ledgercore_persistence_tests
     PRIVATE
         ledgercore_persistence
         ledgercore_reporting
+        ledgercore_journalquery
         GTest::gtest_main
         ledgercore_warnings
 )

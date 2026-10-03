@@ -254,3 +254,35 @@ TEST(CommandParserTest, PeriodCommandsRejectMissingOrUnknownArguments) {
     EXPECT_THROW(parseLine("period create --start 2027-01-01 --end 2028-01-01 --state closed"), CliUsageError);
     EXPECT_THROW(parseLine("period list --all"), CliUsageError);
 }
+
+TEST(CommandParserTest, ValidJournalCommands) {
+    const auto all = parseLine("journal");
+    ASSERT_TRUE(all.has_value());
+    EXPECT_EQ(all->kind, CommandKind::Journal);
+    EXPECT_TRUE(all->from.empty());
+    EXPECT_TRUE(all->code.empty());
+    EXPECT_FALSE(all->standardOnly);
+    EXPECT_FALSE(all->closingOnly);
+
+    const auto filtered = parseLine("journal --from 2026-01-01 --to 2027-01-01 --account 1000 --closing");
+    ASSERT_TRUE(filtered.has_value());
+    EXPECT_EQ(filtered->from, "2026-01-01");
+    EXPECT_EQ(filtered->to, "2027-01-01");
+    EXPECT_EQ(filtered->code, "1000");
+    EXPECT_TRUE(filtered->closingOnly);
+    EXPECT_FALSE(filtered->standardOnly);
+
+    EXPECT_TRUE(parseLine("journal --standard")->standardOnly);
+}
+
+TEST(CommandParserTest, JournalRejectsContradictoryMissingOrUnknownArguments) {
+    EXPECT_THROW(parseLine("journal --standard --closing"), CliUsageError);
+    EXPECT_THROW(parseLine("journal --closing --closing"), CliUsageError);
+    EXPECT_THROW(parseLine("journal --from 2026-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("journal --to 2027-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("journal --account"), CliUsageError);
+    EXPECT_THROW(parseLine("journal --account 1000 --account 2000"), CliUsageError);
+    EXPECT_THROW(parseLine("journal --as-of 2027-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("journal --kind closing"), CliUsageError);
+    EXPECT_THROW(parseLine("journal 1000"), CliUsageError);
+}

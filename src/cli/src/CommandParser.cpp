@@ -329,6 +329,39 @@ ParsedCommand parseClose(const std::vector<std::string>& tokens) {
     return pc;
 }
 
+ParsedCommand parseJournal(const std::vector<std::string>& tokens) {
+    RawArgs args = splitRawArgs(tokens, 1, {"standard", "closing"});
+    rejectUnknownFlags(args, {"from", "to", "account", "standard", "closing"});
+    rejectPositionals(args);
+
+    const bool hasFrom = hasFlag(args, "from");
+    const bool hasTo = hasFlag(args, "to");
+    if (hasFrom != hasTo) {
+        throw CliUsageError("--from and --to must be given together");
+    }
+    ParsedCommand pc;
+    pc.kind = CommandKind::Journal;
+    pc.standardOnly = hasFlag(args, "standard");
+    pc.closingOnly = hasFlag(args, "closing");
+    if (pc.standardOnly && pc.closingOnly) {
+        throw CliUsageError("--standard and --closing cannot be combined");
+    }
+    if (args.flags.count("standard") > 0 && args.flags.at("standard").size() > 1) {
+        throw CliUsageError("flag --standard may only be given once");
+    }
+    if (args.flags.count("closing") > 0 && args.flags.at("closing").size() > 1) {
+        throw CliUsageError("flag --closing may only be given once");
+    }
+    if (hasFrom) {
+        pc.from = requireSingle(args, "from");
+        pc.to = requireSingle(args, "to");
+    }
+    if (hasFlag(args, "account")) {
+        pc.code = requireSingle(args, "account");
+    }
+    return pc;
+}
+
 ParsedCommand parsePeriod(const std::vector<std::string>& tokens) {
     if (tokens.size() < 2) {
         throw CliUsageError("'period' requires a subcommand: create|close|list");
@@ -439,6 +472,9 @@ std::optional<ParsedCommand> parseLine(const std::string& line) {
     }
     if (verb == "period") {
         return parsePeriod(tokens);
+    }
+    if (verb == "journal") {
+        return parseJournal(tokens);
     }
 
     throw CliUsageError("unknown command: '" + verb + "'");

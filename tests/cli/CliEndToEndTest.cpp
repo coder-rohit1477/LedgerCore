@@ -633,3 +633,91 @@ TEST(CliEndToEndTest, ClosedPeriodSurvivesSaveAndLoad) {
     EXPECT_NE(result.output.find("2026-01-01  2027-01-01  closed"), std::string::npos) << result.output;
     EXPECT_NE(result.output.find("into closed accounting period"), std::string::npos);
 }
+
+// ---------------------------------------------------------------------
+// Phase 19: journal
+// ---------------------------------------------------------------------
+
+namespace {
+
+// kYearOneScript (#1 invest, #2 sale 700, #3 rent 250), then a close
+// (#4) and a next-year sale (#5).
+std::string journalScript(const std::string& journalCommand) {
+    return std::string(kYearOneScript)
+           + "close --retained-earnings 3100 --as-of 2027-01-01\n"
+             "post --date 2027-02-01 --description \"Next year\" --debit 1000:12.34 --credit 4000:12.34\n"
+           + journalCommand + "\n";
+}
+
+std::string journalSection(const std::string& output) {
+    const std::size_t pos = output.find("Journal (USD)");
+    return pos == std::string::npos ? "" : output.substr(pos);
+}
+
+} // namespace
+
+TEST(CliEndToEndTest, JournalListsEveryEntryWithLinesInPostingOrder) {
+    const RunResult result = runScript(journalScript("journal"));
+    ASSERT_EQ(result.exitCode, 0) << result.output;
+    const std::string journal = journalSection(result.output);
+    EXPECT_EQ(journal.rfind("Journal (USD): 5 entries\n", 0), 0u) << journal;
+    EXPECT_NE(journal.find("#1  2026-01-01  standard  \"invest\"\n"
+                           "  DEBIT   1000      Cash                           1000.00 USD\n"
+                           "  CREDIT  3000      Capital                        1000.00 USD\n"),
+              std::string::npos)
+        << journal;
+    EXPECT_NE(journal.find("#4  2026-12-31T23:59:59.999999000Z  closing  \"Closing entry\"\n"), std::string::npos)
+        << journal;
+    EXPECT_NE(journal.find("  CREDIT  3100      RetainedEarnings                450.00 USD\n"), std::string::npos);
+    EXPECT_NE(journal.find("12.34 USD"), std::string::npos);
+    EXPECT_LT(journal.find("#1 "), journal.find("#2 "));
+    EXPECT_LT(journal.find("#4 "), journal.find("#5 "));
+}
+
+TEST(CliEndToEndTest, JournalDateFilterUsesHalfOpenRange) {
+    const RunResult result = runScript(journalScript("journal --from 2026-03-01 --to 2026-06-01"));
+    ASSERT_EQ(result.exitCode, 0) << result.output;
+    const std::string journal = journalSection(result.output);
+    EXPECT_EQ(journal.rfind("Journal (USD): 1 entry\n", 0), 0u) << journal;  // sale on 03-01; rent on 06-01 excluded
+    EXPECT_NE(journal.find("#2  2026-03-01  standard  \"sale\""), std::string::npos);
+    EXPECT_EQ(journal.find("#3 "), std::string::npos);
+}
+
+TEST(CliEndToEndTest, JournalAccountFilterMatchesDebitAndCreditLines) {
+    const RunResult result = runScript(journalScript("journal --account 5000"));
+    ASSERT_EQ(result.exitCode, 0) << result.output;
+    const std::string journal = journalSection(result.output);
+    EXPECT_EQ(journal.rfind("Journal (USD): 2 entries\n", 0), 0u) << journal;  // rent (debit) + close (credit)
+    EXPECT_NE(journal.find("#3 "), std::string::npos);
+    EXPECT_NE(journal.find("#4 "), std::string::npos);
+}
+
+TEST(CliEndToEndTest, JournalKindFilters) {
+    const RunResult closing = runScript(journalScript("journal --closing"));
+    ASSERT_EQ(closing.exitCode, 0) << closing.output;
+    EXPECT_EQ(journalSection(closing.output).rfind("Journal (USD): 1 entry\n#4 ", 0), 0u) << closing.output;
+
+    const RunResult standard = runScript(journalScript("journal --standard --account 4000"));
+    ASSERT_EQ(standard.exitCode, 0) << standard.output;
+    const std::string journal = journalSection(standard.output);
+    EXPECT_EQ(journal.rfind("Journal (USD): 2 entries\n", 0), 0u) << journal;  // #2 and #5, not the close
+    EXPECT_EQ(journal.find("closing"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, JournalWithNoMatchesPrintsAnEmptyResult) {
+    const RunResult result = runScript(journalScript("journal --from 2030-01-01 --to 2031-01-01"));
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_EQ(journalSection(result.output), "Journal (USD): 0 entries\n");
+}
+
+TEST(CliEndToEndTest, JournalRejectsInvalidFiltersWithUsageExitCode) {
+    EXPECT_EQ(runScript(journalScript("journal --standard --closing")).exitCode, 1);
+    EXPECT_EQ(runScript(journalScript("journal --from 2026-01-01")).exitCode, 1);
+    EXPECT_EQ(runScript(journalScript("journal --from 2026-02-30 --to 2027-01-01")).exitCode, 1);
+    EXPECT_EQ(runScript(journalScript("journal --bogus")).exitCode, 1);
+    const RunResult unknownAccount = runScript(journalScript("journal --account 9999"));
+    EXPECT_EQ(unknownAccount.exitCode, 1);
+    EXPECT_NE(unknownAccount.output.find("no such account: '9999'"), std::string::npos);
+    // An inverted range is the existing domain Period rule (accounting exit code).
+    EXPECT_EQ(runScript(journalScript("journal --from 2027-01-01 --to 2026-01-01")).exitCode, 2);
+}

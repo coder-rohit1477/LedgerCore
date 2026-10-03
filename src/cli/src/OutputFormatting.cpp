@@ -5,6 +5,8 @@
 
 #include "ledgercore/domain/AccountType.h"
 #include "ledgercore/domain/DateFormatting.h"
+#include "ledgercore/domain/JournalEntry.h"
+#include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/Money.h"
 #include "ledgercore/reporting/ReportLine.h"
 
@@ -130,6 +132,25 @@ void printAccountingPeriods(std::ostream& out, const ledger::Ledger& ledger) {
         out << std::left << std::setw(kCodeWidth + 2) << domain::formatUtc(period.period().start())
             << std::setw(kCodeWidth + 2) << domain::formatUtc(period.period().end())
             << (period.isClosed() ? "closed" : "open") << "\n";
+    }
+}
+
+void printJournal(std::ostream& out, const std::vector<ledger::PostedJournalEntry>& entries,
+                  const domain::ChartOfAccounts& chart, const domain::Currency& currency) {
+    out << "Journal (" << currency.code() << "): " << entries.size() << (entries.size() == 1 ? " entry" : " entries")
+        << "\n";
+    for (const ledger::PostedJournalEntry& posted : entries) {
+        const domain::JournalEntry& entry = posted.entry();
+        out << "#" << posted.id().value() << "  " << domain::formatUtc(entry.date()) << "  "
+            << (entry.isClosing() ? "closing" : "standard") << "  \"" << entry.description() << "\"\n";
+        for (const domain::JournalEntryLine& line : entry.lines()) {
+            const domain::Account* account = chart.findById(line.accountId());
+            const std::string code = account != nullptr ? account->code().value() : "?";
+            const std::string name = account != nullptr ? account->name() : "(unknown account)";
+            out << "  " << std::left << std::setw(8) << (line.isDebit() ? "DEBIT" : "CREDIT") << std::setw(kCodeWidth)
+                << code << std::setw(kNameWidth) << name << std::right << std::setw(kAmountWidth)
+                << line.amount().toString() << "\n";
+        }
     }
 }
 

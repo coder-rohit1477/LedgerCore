@@ -85,6 +85,10 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Overlapping or duplicate periods are rejected; adjacent periods and gaps are allowed
 - Locking never changes a balance, a posted entry, or any report — see [§6](#accounting-periods-and-period-locking)
 
+### Journal History Queries
+- `journalquery::findJournalEntries(ledger, query)` returns posted journal entries matching an immutable `JournalQuery`: business-date range (`[start, end)`), account involvement (any debit or credit line), and kind (all / standard only / closing only), combined with AND
+- Results keep the Ledger's posting order and are lifetime-safe copies; querying is read-only — see [§6](#journal-history-queries-1)
+
 ### Persistence
 - Versioned, deterministic, line-oriented text snapshot: `LEDGERCORE-SNAPSHOT v1`, `v2` when it contains a closing entry, `v3` when it defines accounting periods — always the lowest version that can represent the session
 - AccountCode is the persisted account identity; AccountIds are regenerated on load
@@ -98,7 +102,7 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 
 ### Command-Line Interface
 - `ledgercore` with no arguments starts an interactive REPL; `ledgercore --script <file>` runs commands from a file
-- Commands: `account`, `post`, `trial-balance`, `balance-sheet`, `income-statement`, `formula eval`, `computed`, `close`, `period`, `save`, `load`, `exit`
+- Commands: `account`, `post`, `trial-balance`, `balance-sheet`, `income-statement`, `formula eval`, `computed`, `close`, `period`, `journal`, `save`, `load`, `exit`
 - Dates are `YYYY-MM-DD` (UTC midnight), validated against real calendar days and the supported range
 - `load` replaces the whole session atomically; a failed load leaves the current session untouched
 
@@ -149,6 +153,8 @@ cli (ledgercore executable) ──► persistence ──► posting, computed (�
             │
             ├─────────────────► closing ──► posting, trialbalance (──► ledger, domain)
             │
+            ├─────────────────► journalquery ──► ledger (──► domain)
+            │
             └─────────────────► reporting ──► trialbalance (──► ledger, domain)
 ```
 
@@ -168,6 +174,7 @@ cli (ledgercore executable) ──► persistence ──► posting, computed (�
 | `computed` | `@name` computed-account definitions, dependency resolution, and cycle detection, built on the formula engine | `domain`, `ledger`, `formula` |
 | `reporting` | Balance Sheet and Income Statement, derived from an already-generated Trial Balance | `domain`, `trialbalance` |
 | `closing` | Closing entries: closes Revenue/Expense balances into a retained-earnings Equity account through one posted closing entry | `domain`, `ledger`, `posting`, `trialbalance` |
+| `journalquery` | Read-only, deterministic filtering of posted journal history (date range, account, entry kind) | `domain`, `ledger` |
 | `persistence` | Versioned text snapshot save/load of a whole session (chart, journal history, computed definitions), replaying history through `posting` | `domain`, `ledger`, `posting`, `computed` |
 | `cli` | The `ledgercore` executable: REPL and `--script` modes, input parsing, report formatting, session ownership | `persistence`, `reporting` (and the rest transitively) |
 
@@ -253,6 +260,24 @@ ledger.closeAccountingPeriod(Period(2027-01-01, 2028-01-01));    // Open -> Clos
 
 Snapshots persist each period's bounds and **current** state (format `v3`) — final-state semantics, not an audit log: a snapshot does not record *when* a period was closed, so it cannot tell whether a historical entry was posted before or after the close (live, only "before" is possible). Loading replays the whole journal first and then restores the periods, wherever their records appear in the file, so entries dated inside a closed period load as legitimate history, and the restored lock rejects any *new* posting dated inside it.
 
+### Journal History Queries
+
+`journalquery` is a read-only projection of `ledger.postedEntries()` — no second store, index, or cache:
+
+```cpp
+const auto entries = journalquery::findJournalEntries(
+    ledger, JournalQuery()
+                .withDateRange(Period(start, end))        // business date in [start, end)
+                .withAccount(cashId)                      // on any debit or credit line
+                .withKind(EntryKindFilter::StandardOnly)); // or ClosingOnly / All (default)
+```
+
+- **Filters** combine with AND; an unset filter matches everything. Entry kind comes only from `JournalEntry::kind()`, never from descriptions or line shapes.
+- **Historical, not lock-aware.** A date-range query returns the same entries whether or not an accounting period covering those dates is open or closed — period locking restricts *postings*, never history.
+- **Ordering.** Results are in the Ledger's posting order (ascending `PostingId`), the journal's only stable order. They are *not* re-sorted by business date: a backdated entry appears where it was posted, and entries sharing a date keep their posting order. Lines appear in their recorded order.
+- **Results** are copies of the matching `PostedJournalEntry`s (posting id, business date, description, kind, currency, lines), so they stay valid after later postings. Cost is a linear scan: O(entries × lines per entry).
+- **Persistence.** Queries operate on journal history only, so they return identical results before saving and after loading any v1/v2/v3 snapshot.
+
 ## 7. Formula / Computed Account Example
 
 A computed account is a name bound to a formula string, registered with `ComputedAccountRegistry::define`:
@@ -293,7 +318,7 @@ The Formula Engine has no knowledge of `ComputedAccountRegistry`, `ChartOfAccoun
 
 ## 8. Testing
 
-**659 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
+**690 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
 
 | Module | Tests |
 |---|---|
@@ -305,8 +330,9 @@ The Formula Engine has no knowledge of `ComputedAccountRegistry`, `ChartOfAccoun
 | trialbalance | 52 |
 | reporting | 30 |
 | closing | 40 |
-| persistence | 76 |
-| cli (input parsing, command parsing, session, process-level end-to-end) | 107 |
+| journalquery | 22 |
+| persistence | 77 |
+| cli (input parsing, command parsing, session, process-level end-to-end) | 115 |
 | smoke | 1 |
 
 The suite mixes unit, integration, and property-style tests, targeted at the invariants the domain actually cares about rather than at raw line coverage:
@@ -319,6 +345,7 @@ The suite mixes unit, integration, and property-style tests, targeted at the inv
 - period boundary behavior (`[start, end)` edges, adjacent-period tiling, backdated entries)
 - reporting equations (Balance Sheet / Income Statement identities hold after randomized posting sequences)
 - accounting periods (overlap rules, one-way lifecycle, `[start, end)` lock boundaries, atomic rejection of backdated postings, report invariance under locking, v3 final-state persistence and hand-edited period records)
+- journal history queries (each filter and their combination, `[start, end)` boundaries, posting-order determinism, same-date ordering, exact Money/currency, read-only behaviour, identical results across save/load for v1/v2/v3)
 - closing entries (sign correctness for every account type, net income/loss, contra balances, invalid targets, atomic failure, repeated and multi-year closing, report consistency before and after closing)
 - persistence round trips (save → load → save is byte-identical), corruption and version handling, failed-load isolation, date-range boundaries
 - CLI behavior through the real executable (exit codes, REPL vs. script error handling, save/load)
@@ -396,6 +423,23 @@ period close --start 2026-01-01 --end 2027-01-01
 period list
 ```
 
+Querying journal history (`--from`/`--to` together, `--to` exclusive; `--standard` and `--closing` are mutually exclusive; filters combine):
+
+```
+journal
+journal --from 2026-01-01 --to 2027-01-01
+journal --account 4000 --standard
+journal --closing
+```
+
+```
+Journal (USD): 1 entry
+#3  2026-12-31T23:59:59.999999000Z  closing  "Closing entry"
+  DEBIT   4000      Sales                           700.00 USD
+  CREDIT  5000      Rent                            250.00 USD
+  CREDIT  3100      RetainedEarnings                450.00 USD
+```
+
 In the REPL, a failing command prints `error: ...` and the session continues. In `--script` mode the first failing command stops the run with exit code `1` (command syntax, a malformed date or amount, a date outside the supported range, or a snapshot file problem) or `2` (a rule enforced by the engine, e.g. an unbalanced entry, an unknown account, or posting to a group account); `3` means an unexpected internal error. A script that completes exits `0`.
 
 ## 10. Project Structure
@@ -416,6 +460,7 @@ LedgerCore/
 │   ├── computed/
 │   ├── reporting/
 │   ├── closing/
+│   ├── journalquery/
 │   ├── persistence/
 │   └── cli/
 ├── tests/
@@ -427,6 +472,7 @@ LedgerCore/
 │   ├── computed/
 │   ├── reporting/
 │   ├── closing/
+│   ├── journalquery/
 │   ├── persistence/
 │   ├── cli/
 │   └── smoke_test.cpp
@@ -451,9 +497,9 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 ## 12. Current Status
 
-Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, snapshot persistence, and the `ledgercore` CLI.
+Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
-- 659 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
+- 690 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 

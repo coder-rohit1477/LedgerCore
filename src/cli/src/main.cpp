@@ -11,6 +11,7 @@
 #include "OutputFormatting.h"
 
 #include "ledgercore/closing/ClosingEngine.h"
+#include "ledgercore/journalquery/JournalQuery.h"
 #include "ledgercore/computed/LedgerAccountResolver.h"
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountCode.h"
@@ -216,6 +217,28 @@ void executePeriodClose(const ParsedCommand& pc, LedgerSession& session, std::os
         << "): postings dated inside it are now rejected\n";
 }
 
+// Translates flags into a journalquery::JournalQuery; all filtering is the
+// library's.
+void executeJournal(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
+    journalquery::JournalQuery query;
+    if (!pc.from.empty()) {
+        query = query.withDateRange(domain::Period(parseDate(pc.from), parseDate(pc.to)));
+    }
+    if (!pc.code.empty()) {
+        const domain::Account* account = session.chart().findByCode(parseAccountCode(pc.code));
+        if (account == nullptr) {
+            throw CliUsageError("no such account: '" + pc.code + "'");
+        }
+        query = query.withAccount(account->id());
+    }
+    if (pc.standardOnly) {
+        query = query.withKind(journalquery::EntryKindFilter::StandardOnly);
+    } else if (pc.closingOnly) {
+        query = query.withKind(journalquery::EntryKindFilter::ClosingOnly);
+    }
+    printJournal(out, journalquery::findJournalEntries(session.ledger(), query), session.chart(), session.currency());
+}
+
 void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
     switch (pc.kind) {
         case CommandKind::AccountCreateRoot:
@@ -271,6 +294,9 @@ void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out)
             return;
         case CommandKind::PeriodList:
             printAccountingPeriods(out, session.ledger());
+            return;
+        case CommandKind::Journal:
+            executeJournal(pc, session, out);
             return;
         case CommandKind::Exit:
             return;
@@ -328,7 +354,7 @@ int runRepl(LedgerSession& session) {
     std::cout << "LedgerCore CLI -- in-memory session; state is lost when this process exits unless you 'save' it "
                   "first.\n";
     std::cout << "Commands: account, post, trial-balance, balance-sheet, income-statement, formula, computed, "
-                  "close, period, save, load.\n";
+                  "close, period, journal, save, load.\n";
     std::cout << "Type 'exit' or 'quit' to leave, or send EOF (Ctrl-D).\n";
 
     std::string line;
