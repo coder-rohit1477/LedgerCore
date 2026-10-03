@@ -201,6 +201,21 @@ void executeClose(const ParsedCommand& pc, LedgerSession& session, std::ostream&
         << " as of " << pc.asOf << " (net income " << result.netIncome.toString() << ")\n";
 }
 
+domain::Period parsePeriodArgs(const ParsedCommand& pc) {
+    return domain::Period(parseDate(pc.periodStart), parseDate(pc.periodEnd));
+}
+
+void executePeriodCreate(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
+    session.ledger().defineAccountingPeriod(parsePeriodArgs(pc));
+    out << "created accounting period [" << pc.periodStart << ", " << pc.periodEnd << ") (open)\n";
+}
+
+void executePeriodClose(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
+    session.ledger().closeAccountingPeriod(parsePeriodArgs(pc));
+    out << "closed accounting period [" << pc.periodStart << ", " << pc.periodEnd
+        << "): postings dated inside it are now rejected\n";
+}
+
 void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
     switch (pc.kind) {
         case CommandKind::AccountCreateRoot:
@@ -247,6 +262,15 @@ void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out)
             return;
         case CommandKind::Close:
             executeClose(pc, session, out);
+            return;
+        case CommandKind::PeriodCreate:
+            executePeriodCreate(pc, session, out);
+            return;
+        case CommandKind::PeriodClose:
+            executePeriodClose(pc, session, out);
+            return;
+        case CommandKind::PeriodList:
+            printAccountingPeriods(out, session.ledger());
             return;
         case CommandKind::Exit:
             return;
@@ -304,7 +328,7 @@ int runRepl(LedgerSession& session) {
     std::cout << "LedgerCore CLI -- in-memory session; state is lost when this process exits unless you 'save' it "
                   "first.\n";
     std::cout << "Commands: account, post, trial-balance, balance-sheet, income-statement, formula, computed, "
-                  "close, save, load.\n";
+                  "close, period, save, load.\n";
     std::cout << "Type 'exit' or 'quit' to leave, or send EOF (Ctrl-D).\n";
 
     std::string line;

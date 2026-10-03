@@ -4,6 +4,7 @@
 
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/ChartOfAccounts.h"
+#include "ledgercore/ledger/Ledger.h"
 #include "ledgercore/reporting/BalanceSheet.h"
 #include "ledgercore/reporting/IncomeStatement.h"
 #include "ledgercore/trialbalance/TrialBalance.h"
@@ -36,5 +37,9 @@ void printIncomeStatement(std::ostream& out, const reporting::IncomeStatement& i
 void printAccountList(std::ostream& out, const domain::ChartOfAccounts& chart, bool tree);
 
 void printAccountDetail(std::ostream& out, const domain::Account& account);
+
+// One line per accounting period, in the Ledger's own order (ascending
+// start): "<start>  <end>  open|closed", end exclusive.
+void printAccountingPeriods(std::ostream& out, const ledger::Ledger& ledger);
 
 } // namespace ledgercore::cli

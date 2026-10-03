@@ -4,6 +4,7 @@ add_library(ledgercore_domain STATIC
     src/Money.cpp
     src/JournalEntry.cpp
     src/NormalBalance.cpp
+    src/DateFormatting.cpp
 )
 
 target_include_directories(ledgercore_domain

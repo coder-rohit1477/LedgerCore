@@ -36,6 +36,9 @@ enum class CommandKind {
     Save,
     Load,
     Close,
+    PeriodCreate,
+    PeriodClose,
+    PeriodList,
     Exit
 };
 
@@ -84,6 +87,10 @@ struct ParsedCommand {
 
     // close
     std::string retainedEarningsCode;
+
+    // period create / close
+    std::string periodStart;
+    std::string periodEnd;
 };
 
 // Splits one input line into tokens on whitespace, with basic

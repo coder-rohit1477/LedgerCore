@@ -1,9 +1,12 @@
 #include "ledgercore/ledger/Ledger.h"
 
+#include <algorithm>
 #include <chrono>
 #include <utility>
 
+#include "ledgercore/domain/DateFormatting.h"
 #include "ledgercore/domain/JournalEntryLine.h"
+#include "ledgercore/ledger/LedgerExceptions.h"
 
 namespace ledgercore::ledger {
 
@@ -23,6 +26,57 @@ bool Ledger::hasPostingHistory(domain::AccountId accountId) const noexcept {
         }
     }
     return false;
+}
+
+namespace {
+
+std::string describe(const domain::Period& period) {
+    return "[" + domain::formatUtc(period.start()) + ", " + domain::formatUtc(period.end()) + ")";
+}
+
+bool sameBounds(const domain::Period& lhs, const domain::Period& rhs) noexcept {
+    return lhs.start() == rhs.start() && lhs.end() == rhs.end();
+}
+
+} // namespace
+
+void Ledger::defineAccountingPeriod(const domain::Period& period) {
+    for (const AccountingPeriod& existing : accountingPeriods_) {
+        const domain::Period& other = existing.period();
+        if (period.start() < other.end() && other.start() < period.end()) {
+            throw AccountingPeriodOverlapException("Accounting period " + describe(period)
+                                                   + " overlaps existing accounting period " + describe(other));
+        }
+    }
+    const auto position = std::upper_bound(
+        accountingPeriods_.begin(), accountingPeriods_.end(), period.start(),
+        [](std::chrono::system_clock::time_point start, const AccountingPeriod& candidate) {
+            return start < candidate.period().start();
+        });
+    accountingPeriods_.insert(position, AccountingPeriod(period));
+}
+
+void Ledger::closeAccountingPeriod(const domain::Period& period) {
+    for (AccountingPeriod& existing : accountingPeriods_) {
+        if (sameBounds(existing.period(), period)) {
+            if (existing.isClosed()) {
+                throw AccountingPeriodAlreadyClosedException("Accounting period " + describe(period)
+                                                             + " is already closed");
+            }
+            existing.state_ = AccountingPeriodState::Closed;
+            return;
+        }
+    }
+    throw UnknownAccountingPeriodException("No accounting period is defined as " + describe(period));
+}
+
+const AccountingPeriod* Ledger::closedPeriodContaining(std::chrono::system_clock::time_point date) const noexcept {
+    for (const AccountingPeriod& candidate : accountingPeriods_) {
+        if (candidate.isClosed() && candidate.period().contains(date)) {
+            return &candidate;
+        }
+    }
+    return nullptr;
 }
 
 PostingId Ledger::commit(domain::JournalEntry entry,

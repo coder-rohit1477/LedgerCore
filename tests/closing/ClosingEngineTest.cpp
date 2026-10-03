@@ -51,6 +51,7 @@ using ledgercore::domain::Period;
 using ledgercore::ledger::Ledger;
 using ledgercore::ledger::PostedJournalEntry;
 using ledgercore::posting::AccountNotFoundException;
+using ledgercore::posting::ClosedPeriodPostingException;
 using ledgercore::posting::InvalidPostingTargetException;
 using ledgercore::posting::post;
 using ledgercore::reporting::BalanceSheet;
@@ -732,4 +733,105 @@ TEST(ClosingEngineTest, IndependentLedgersCloseIndependently) {
     EXPECT_EQ(second.close(kYearEnd).netIncome, -usd(70));
     EXPECT_EQ(first.balance(first.retained), usd(100));
     EXPECT_EQ(second.balance(second.retained), -usd(70));
+}
+
+// ---------------------------------------------------------------------
+// Accounting-period locks vs. closing entries (Phase 18): separate
+// operations -- closing transfers balances, locking forbids postings.
+// ---------------------------------------------------------------------
+
+namespace {
+
+void expectSameTrialBalance(const TrialBalance& lhs, const TrialBalance& rhs) {
+    ASSERT_EQ(lhs.lines().size(), rhs.lines().size());
+    for (std::size_t i = 0; i < lhs.lines().size(); ++i) {
+        EXPECT_EQ(lhs.lines()[i].accountId(), rhs.lines()[i].accountId());
+        EXPECT_EQ(lhs.lines()[i].debit(), rhs.lines()[i].debit());
+        EXPECT_EQ(lhs.lines()[i].credit(), rhs.lines()[i].credit());
+    }
+    EXPECT_EQ(lhs.totalDebits(), rhs.totalDebits());
+    EXPECT_EQ(lhs.totalCredits(), rhs.totalCredits());
+}
+
+} // namespace
+
+TEST(ClosingEngineTest, CloseThenLockIsTheSupportedYearEndWorkflow) {
+    Books books;
+    const Period year(day(0), kYearEnd);
+    books.earn(day(10), books.sales, 500);
+    books.spend(day(20), books.rent, 200);
+    books.ledger.defineAccountingPeriod(year);
+
+    books.close(kYearEnd);  // closing entry dated kYearEnd - 1us, inside the still-open period
+    books.ledger.closeAccountingPeriod(year);
+
+    EXPECT_EQ(books.balance(books.retained), usd(300));
+    expectTemporaryBalancesZero(books);
+    // Nothing can be added to the locked year afterwards -- including a
+    // second closing attempt, which finds nothing to close anyway.
+    EXPECT_THROW(books.earn(day(30), books.sales, 1), ClosedPeriodPostingException);
+    EXPECT_THROW(books.close(kYearEnd), NothingToCloseException);
+}
+
+TEST(ClosingEngineTest, ClosingIntoAnAlreadyLockedPeriodIsRejectedWithoutMutation) {
+    Books books;
+    const Period year(day(0), kYearEnd);
+    books.earn(day(10), books.sales, 500);
+    books.ledger.defineAccountingPeriod(year);
+    books.ledger.closeAccountingPeriod(year);
+    const LedgerSnapshot before = snapshot(books);
+
+    // The closing entry would be dated kYearEnd - 1us, inside the lock.
+    EXPECT_THROW(books.close(kYearEnd), ClosedPeriodPostingException);
+    expectUnchanged(books, before);
+}
+
+TEST(ClosingEngineTest, LockedEarlierPeriodsAreClosedByALaterCloseInAnOpenPeriod) {
+    // Monthly-style locks without closing entries: the lock only stops new
+    // postings; the year-end close (dated in the still-open last period)
+    // closes all temporary activity, locked months included.
+    Books books;
+    books.earn(day(10), books.sales, 400);   // in the locked first period
+    books.spend(day(200), books.rent, 100);  // in the open second period
+    books.ledger.defineAccountingPeriod(Period(day(0), day(100)));
+    books.ledger.defineAccountingPeriod(Period(day(100), kYearEnd));
+    books.ledger.closeAccountingPeriod(Period(day(0), day(100)));
+
+    const ClosingResult result = books.close(kYearEnd);
+
+    EXPECT_EQ(result.netIncome, usd(300));
+    expectTemporaryBalancesZero(books);
+}
+
+TEST(ClosingEngineTest, LockingAPeriodDoesNotChangeAnyReport) {
+    Books books;
+    books.postEntry(day(1), books.cash, books.capital, usd(2000));
+    books.earn(day(10), books.sales, 700);
+    books.spend(day(20), books.rent, 250);
+    books.close(kYearEnd);
+    books.earn(day(400), books.services, 90);
+    const Period year(day(0), kYearEnd);
+    books.ledger.defineAccountingPeriod(year);
+
+    const TrialBalance cumulativeBefore = TrialBalance::generate(books.chart, books.ledger);
+    const TrialBalance asOfBefore = TrialBalance::generateAsOf(books.chart, books.ledger, kYearEnd);
+    const TrialBalance periodBefore =
+        TrialBalance::generateForPeriod(books.chart, books.ledger, year, ClosingEntries::Exclude);
+    const BalanceSheet bsBefore = BalanceSheet::generate(asOfBefore);
+    const IncomeStatement isBefore = IncomeStatement::generate(periodBefore);
+
+    books.ledger.closeAccountingPeriod(year);
+
+    expectSameTrialBalance(TrialBalance::generate(books.chart, books.ledger), cumulativeBefore);
+    const TrialBalance asOfAfter = TrialBalance::generateAsOf(books.chart, books.ledger, kYearEnd);
+    expectSameTrialBalance(asOfAfter, asOfBefore);
+    const TrialBalance periodAfter =
+        TrialBalance::generateForPeriod(books.chart, books.ledger, year, ClosingEntries::Exclude);
+    expectSameTrialBalance(periodAfter, periodBefore);
+    const BalanceSheet bsAfter = BalanceSheet::generate(asOfAfter);
+    EXPECT_EQ(bsAfter.assets().total(), bsBefore.assets().total());
+    EXPECT_EQ(bsAfter.liabilities().total(), bsBefore.liabilities().total());
+    EXPECT_EQ(bsAfter.equity().total(), bsBefore.equity().total());
+    EXPECT_EQ(IncomeStatement::generate(periodAfter).netIncome(), isBefore.netIncome());
+    EXPECT_EQ(isBefore.netIncome(), usd(450));
 }

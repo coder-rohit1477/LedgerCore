@@ -329,6 +329,33 @@ ParsedCommand parseClose(const std::vector<std::string>& tokens) {
     return pc;
 }
 
+ParsedCommand parsePeriod(const std::vector<std::string>& tokens) {
+    if (tokens.size() < 2) {
+        throw CliUsageError("'period' requires a subcommand: create|close|list");
+    }
+    const std::string& sub = tokens[1];
+
+    if (sub == "create" || sub == "close") {
+        RawArgs args = splitRawArgs(tokens, 2);
+        rejectUnknownFlags(args, {"start", "end"});
+        rejectPositionals(args);
+        ParsedCommand pc;
+        pc.kind = sub == "create" ? CommandKind::PeriodCreate : CommandKind::PeriodClose;
+        pc.periodStart = requireSingle(args, "start");
+        pc.periodEnd = requireSingle(args, "end");
+        return pc;
+    }
+    if (sub == "list") {
+        RawArgs args = splitRawArgs(tokens, 2);
+        rejectUnknownFlags(args, {});
+        rejectPositionals(args);
+        ParsedCommand pc;
+        pc.kind = CommandKind::PeriodList;
+        return pc;
+    }
+    throw CliUsageError("unknown 'period' subcommand: '" + sub + "'");
+}
+
 } // namespace
 
 std::vector<std::string> tokenizeLine(const std::string& line) {
@@ -409,6 +436,9 @@ std::optional<ParsedCommand> parseLine(const std::string& line) {
     }
     if (verb == "close") {
         return parseClose(tokens);
+    }
+    if (verb == "period") {
+        return parsePeriod(tokens);
     }
 
     throw CliUsageError("unknown command: '" + verb + "'");

@@ -1358,7 +1358,9 @@ TEST(SessionStoreTest, V2SnapshotIsAcceptedAndUnknownVersionStillRejected) {
     LoadedSession loaded = ledgercore::persistence::load(file.path());
     EXPECT_NE(loaded.chart->findByCode(AccountCode("1000")), nullptr);
 
-    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v3\nCURRENCY USD\n");
+    // v3 (accounting periods) is supported since Phase 18; the next
+    // unknown version must still be rejected.
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v4\nCURRENCY USD\n");
     EXPECT_THROW(ledgercore::persistence::load(file.path()), PersistenceVersionException);
 }
 
@@ -1470,6 +1472,216 @@ TEST(SessionStoreTest, ClosingRecordDateOutsideSupportedRangeIsRejected) {
                               "  DEBIT 4000 100\n"
                               "  CREDIT 3100 100\n");
     EXPECT_THROW(ledgercore::persistence::load(file.path()), PersistenceFormatException);
+}
+
+// ---------------------------------------------------------------------
+// Accounting periods: PERIOD records, format v3 (Phase 18)
+// ---------------------------------------------------------------------
+
+namespace {
+
+std::string nanosText(std::chrono::system_clock::time_point tp) {
+    return std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count());
+}
+
+// Standard chart; sales on day 10 and day 200, an expense on day 300;
+// periods [0,100) CLOSED, [100,365) OPEN, [400,500) CLOSED (defined out
+// of order); a computed definition so record ordering is visible.
+struct PeriodSession {
+    ChartOfAccounts chart;
+    Ledger ledger{Currency("USD")};
+    ComputedAccountRegistry registry;
+    StandardAccounts accounts;
+    PeriodSession() : accounts(setUpStandardChart(chart)) {
+        const Currency usd("USD");
+        post(JournalEntry::create(day(10), "Early sale",
+                                   {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(40, 0, usd)),
+                                    JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(40, 0, usd))}),
+             chart, ledger);
+        post(JournalEntry::create(day(200), "Later sale",
+                                   {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(60, 0, usd)),
+                                    JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(60, 0, usd))}),
+             chart, ledger);
+        post(JournalEntry::create(day(300), "Rent",
+                                   {JournalEntryLine::debit(accounts.expense, Money::fromMajorUnits(25, 0, usd)),
+                                    JournalEntryLine::credit(accounts.cash, Money::fromMajorUnits(25, 0, usd))}),
+             chart, ledger);
+        ledger.defineAccountingPeriod(Period(day(400), day(500)));
+        ledger.defineAccountingPeriod(Period(day(100), day(365)));
+        ledger.defineAccountingPeriod(Period(day(0), day(100)));
+        ledger.closeAccountingPeriod(Period(day(0), day(100)));
+        ledger.closeAccountingPeriod(Period(day(400), day(500)));
+        registry.define(ComputedAccountName("Profit"), "#4000 - #5000");
+    }
+};
+
+std::string periodSnapshot(const std::string& periodRecords, const std::string& version = "v3") {
+    return "LEDGERCORE-SNAPSHOT " + version + "\nCURRENCY USD\n"
+           + "ACCOUNT ROOT 1000 Asset \"Cash\"\nACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+           + "ENTRY " + nanosText(day(10)) + " \"Sale\"\n  DEBIT 1000 100\n  CREDIT 4000 100\n" + periodRecords;
+}
+
+} // namespace
+
+TEST(SessionStoreTest, PeriodsAreWrittenAsV3RecordsAfterEntriesInStartOrder) {
+    PeriodSession session;
+    const ScopedTempFile file(uniqueTempPath("periods_v3"));
+    ledgercore::persistence::save(session.chart, session.ledger, session.registry, file.path());
+    const std::string content = readRawFile(file.path());
+
+    EXPECT_EQ(content.rfind("LEDGERCORE-SNAPSHOT v3\n", 0), 0u);
+    const std::string expectedPeriods = "PERIOD " + nanosText(day(0)) + " " + nanosText(day(100)) + " CLOSED\n"
+                                        + "PERIOD " + nanosText(day(100)) + " " + nanosText(day(365)) + " OPEN\n"
+                                        + "PERIOD " + nanosText(day(400)) + " " + nanosText(day(500)) + " CLOSED\n";
+    const std::size_t periods = content.find(expectedPeriods);
+    ASSERT_NE(periods, std::string::npos) << content;
+    EXPECT_LT(content.rfind("ENTRY "), periods);           // every entry precedes the periods
+    EXPECT_GT(content.find("COMPUTED "), periods);         // computed definitions follow them
+}
+
+TEST(SessionStoreTest, PeriodsAndClosedStateRoundTripAndRemainEnforced) {
+    PeriodSession session;
+    const ScopedTempFile file(uniqueTempPath("periods_round_trip"));
+    ledgercore::persistence::save(session.chart, session.ledger, session.registry, file.path());
+
+    // The day-10 entry lies inside the CLOSED [0,100) period: replayed
+    // before the lock is reapplied, so the snapshot loads.
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+
+    const auto& periods = loaded.ledger->accountingPeriods();
+    ASSERT_EQ(periods.size(), 3u);
+    EXPECT_EQ(periods[0].period().start(), day(0));
+    EXPECT_TRUE(periods[0].isClosed());
+    EXPECT_EQ(periods[1].period().start(), day(100));
+    EXPECT_FALSE(periods[1].isClosed());
+    EXPECT_EQ(periods[2].period().end(), day(500));
+    EXPECT_TRUE(periods[2].isClosed());
+    EXPECT_EQ(loaded.ledger->postedEntries().size(), 3u);
+
+    // The reloaded lock is real.
+    const Account* cash = loaded.chart->findByCode(AccountCode("1000"));
+    const Account* revenue = loaded.chart->findByCode(AccountCode("4000"));
+    const Currency usd("USD");
+    EXPECT_THROW(post(JournalEntry::create(day(50), "Backdated",
+                                           {JournalEntryLine::debit(cash->id(), Money::fromMajorUnits(1, 0, usd)),
+                                            JournalEntryLine::credit(revenue->id(), Money::fromMajorUnits(1, 0, usd))}),
+                      *loaded.chart, *loaded.ledger),
+                 ledgercore::posting::ClosedPeriodPostingException);
+}
+
+TEST(SessionStoreTest, SaveLoadSaveWithPeriodsIsByteIdenticalAndReportsMatch) {
+    PeriodSession session;
+    const ScopedTempFile firstFile(uniqueTempPath("periods_first"));
+    const ScopedTempFile secondFile(uniqueTempPath("periods_second"));
+    ledgercore::persistence::save(session.chart, session.ledger, session.registry, firstFile.path());
+    LoadedSession loaded = ledgercore::persistence::load(firstFile.path());
+    ledgercore::persistence::save(*loaded.chart, *loaded.ledger, *loaded.computedAccounts, secondFile.path());
+    EXPECT_EQ(readRawFile(firstFile.path()), readRawFile(secondFile.path()));
+
+    const TrialBalance live = TrialBalance::generateForPeriod(session.chart, session.ledger, Period(day(0), day(100)));
+    const TrialBalance reloaded =
+        TrialBalance::generateForPeriod(*loaded.chart, *loaded.ledger, Period(day(0), day(100)));
+    EXPECT_EQ(live.totalDebits(), reloaded.totalDebits());
+    EXPECT_EQ(IncomeStatement::generate(TrialBalance::generate(session.chart, session.ledger)).netIncome(),
+              IncomeStatement::generate(TrialBalance::generate(*loaded.chart, *loaded.ledger)).netIncome());
+    EXPECT_EQ(BalanceSheet::generate(TrialBalance::generate(session.chart, session.ledger)).assets().total(),
+              BalanceSheet::generate(TrialBalance::generate(*loaded.chart, *loaded.ledger)).assets().total());
+}
+
+TEST(SessionStoreTest, PeriodsCombineWithClosingEntriesUnderV3) {
+    ChartOfAccounts chart;
+    Ledger ledger(Currency("USD"));
+    ComputedAccountRegistry registry;
+    setUpClosedYear(chart, ledger);  // closing entry dated day(364)
+    ledger.defineAccountingPeriod(Period(day(0), day(365)));
+    ledger.closeAccountingPeriod(Period(day(0), day(365)));
+
+    const ScopedTempFile file(uniqueTempPath("periods_with_closing"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    const std::string content = readRawFile(file.path());
+    EXPECT_EQ(content.rfind("LEDGERCORE-SNAPSHOT v3\n", 0), 0u);
+    EXPECT_NE(content.find("\nCLOSING "), std::string::npos);
+
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    EXPECT_TRUE(loaded.ledger->postedEntries().back().entry().isClosing());
+    EXPECT_TRUE(loaded.ledger->accountingPeriods().at(0).isClosed());
+}
+
+TEST(SessionStoreTest, SaveRejectsAPeriodOutsideTheSupportedDateRange) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    const auto before1900 = std::chrono::system_clock::time_point{} + std::chrono::seconds(-2208988801LL);
+    ledger.defineAccountingPeriod(Period(before1900, day(10)));
+    const ScopedTempFile file(uniqueTempPath("period_out_of_range"));
+    EXPECT_THROW(ledgercore::persistence::save(chart, ledger, registry, file.path()), PersistenceException);
+    EXPECT_FALSE(std::filesystem::exists(file.path()));
+}
+
+TEST(SessionStoreTest, PeriodEndingExactlyAtTheSupportedRangeEndRoundTrips) {
+    const ScopedTempFile file(uniqueTempPath("period_at_range_end"));
+    writeRawFile(file.path(), periodSnapshot("PERIOD " + nanosText(day(400)) + " 7258118400000000000 OPEN\n"));
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    ASSERT_EQ(loaded.ledger->accountingPeriods().size(), 1u);
+}
+
+TEST(SessionStoreTest, HandEditedPeriodRecordsThatAreMalformedAreRejected) {
+    const std::string start = nanosText(day(0));
+    const std::string end = nanosText(day(100));
+    struct Case {
+        std::string label;
+        std::string content;
+        bool formatError;  // PersistenceFormatException vs. a domain/ledger LedgerException
+    };
+    const std::vector<Case> cases = {
+        {"PERIOD in a v2 snapshot", periodSnapshot("PERIOD " + start + " " + end + " OPEN\n", "v2"), true},
+        {"missing state", periodSnapshot("PERIOD " + start + " " + end + "\n"), true},
+        {"extra field", periodSnapshot("PERIOD " + start + " " + end + " OPEN extra\n"), true},
+        {"non-integer bound", periodSnapshot("PERIOD 2027-01-01 " + end + " OPEN\n"), true},
+        {"unknown state", periodSnapshot("PERIOD " + start + " " + end + " LOCKED\n"), true},
+        {"lower-case state", periodSnapshot("PERIOD " + start + " " + end + " closed\n"), true},
+        {"start before 1900", periodSnapshot("PERIOD -2208988800000000001 " + end + " OPEN\n"), true},
+        {"end after 2200", periodSnapshot("PERIOD " + start + " 7258118400000000001 OPEN\n"), true},
+        {"start == end", periodSnapshot("PERIOD " + start + " " + start + " OPEN\n"), false},
+        {"start > end", periodSnapshot("PERIOD " + end + " " + start + " OPEN\n"), false},
+        {"duplicate period",
+         periodSnapshot("PERIOD " + start + " " + end + " OPEN\nPERIOD " + start + " " + end + " CLOSED\n"), false},
+        {"overlapping periods",
+         periodSnapshot("PERIOD " + start + " " + end + " OPEN\nPERIOD " + nanosText(day(50)) + " "
+                        + nanosText(day(150)) + " OPEN\n"),
+         false},
+    };
+    for (const Case& c : cases) {
+        const ScopedTempFile file(uniqueTempPath("bad_period"));
+        writeRawFile(file.path(), c.content);
+        if (c.formatError) {
+            EXPECT_THROW(ledgercore::persistence::load(file.path()), PersistenceFormatException) << c.label;
+        } else {
+            EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::LedgerException) << c.label;
+        }
+    }
+}
+
+TEST(SessionStoreTest, ClosedPeriodPlacedBeforeAnEntryInsideItIsRejected) {
+    // A legitimate snapshot always lists periods after the history; a file
+    // that closes a period and then "adds" an entry dated inside it
+    // describes a posting the live system would have refused.
+    const ScopedTempFile file(uniqueTempPath("closed_before_entry"));
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v3\nCURRENCY USD\n"
+                              "ACCOUNT ROOT 1000 Asset \"Cash\"\nACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+                              "PERIOD " + nanosText(day(0)) + " " + nanosText(day(100)) + " CLOSED\n"
+                              "ENTRY " + nanosText(day(10)) + " \"Sale\"\n  DEBIT 1000 100\n  CREDIT 4000 100\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::posting::ClosedPeriodPostingException);
+}
+
+TEST(SessionStoreTest, MalformedPeriodAndMalformedJournalReportTheFirstProblemInFileOrder) {
+    const ScopedTempFile file(uniqueTempPath("bad_period_and_entry"));
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v3\nCURRENCY USD\n"
+                              "ACCOUNT ROOT 1000 Asset \"Cash\"\nACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+                              "ENTRY " + nanosText(day(10)) + " \"Bad\"\n  DEBIT 1000 100\n  CREDIT 4000 99\n"
+                              "PERIOD " + nanosText(day(0)) + " nope OPEN\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::domain::UnbalancedJournalEntryException);
 }
 
 // ---------------------------------------------------------------------

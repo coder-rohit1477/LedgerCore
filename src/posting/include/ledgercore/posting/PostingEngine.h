@@ -18,8 +18,10 @@ namespace ledgercore::posting {
 // post() never mutates entry, any Account, or chart -- the only thing it
 // mutates is ledger, and only through Ledger's controlled commit path.
 //
-// Sequence: validate every line (account exists, account is a leaf,
-// entry currency matches ledger currency) with no Ledger mutation, then
+// Sequence: validate (entry currency matches ledger currency; entry date
+// is not inside a Closed accounting period of ledger, else
+// ClosedPeriodPostingException; every line's account exists and is a
+// leaf) with no Ledger mutation, then
 // compute every affected account's new balance into a local temporary
 // (aggregating duplicate AccountId lines first, via domain::signedEffect()),
 // then commit -- so a JournalEntry is never partially posted.

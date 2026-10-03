@@ -49,10 +49,15 @@ struct LoadedSession {
 };
 
 // Writes a complete, deterministic snapshot of chart/ledger/computedAccounts
-// to path. The header is "LEDGERCORE-SNAPSHOT v1" unless the ledger contains
-// a closing entry (domain::JournalEntryKind::Closing), which is written as a
-// CLOSING record -- same layout as ENTRY -- under a "v2" header; snapshots
-// without closing entries are therefore byte-identical to earlier builds'.
+// to path. The header is the lowest format version that can represent the
+// session: "v3" if the ledger defines any accounting period (one PERIOD
+// <start-ns> <end-ns> OPEN|CLOSED record each, ordered by start, written
+// after every journal entry), else "v2" if it contains a closing entry
+// (domain::JournalEntryKind::Closing, written as a CLOSING record -- same
+// layout as ENTRY), else "v1". A snapshot therefore stays byte-identical
+// to what earlier builds wrote unless it actually uses a newer feature.
+// Throws PersistenceException if an accounting period lies outside the
+// supported date range.
 // Contents: chart accounts (by AccountCode, parent-before-child, mirroring
 // the tree), ledger.postedEntries() in their exact original order (never
 // re-sorted), and computedAccounts.definitions() in insertion order.
@@ -85,9 +90,17 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
 // line's AccountCode is resolved through the freshly-reconstructed chart to
 // obtain the AccountId posting::post() actually needs.
 //
-// Accepts format v1 and v2; a CLOSING record is only valid in v2 and is
+// Accepts format v1, v2, and v3; a CLOSING record requires v2+ and is
 // replayed through domain::JournalEntry::createClosing() and
-// posting::post(), exactly like ENTRY.
+// posting::post(), exactly like ENTRY. A PERIOD record requires v3 and is
+// rebuilt through Ledger::defineAccountingPeriod() and, for CLOSED,
+// Ledger::closeAccountingPeriod(), in file order -- after the history
+// save() writes before it, so entries inside a since-closed period replay
+// while it is still open, exactly as they were originally posted.
+// Overlapping or duplicate periods, start >= end, an unknown state, or
+// out-of-range bounds are rejected; a hand-edited file that closes a
+// period *before* an entry dated inside it fails with
+// posting::ClosedPeriodPostingException.
 //
 // Throws PersistenceVersionException if the file declares an unsupported
 // format version, PersistenceFormatException for any structural problem

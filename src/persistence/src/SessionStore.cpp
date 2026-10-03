@@ -14,10 +14,13 @@
 #include "ledgercore/domain/AccountCode.h"
 #include "ledgercore/domain/AccountType.h"
 #include "ledgercore/domain/Currency.h"
+#include "ledgercore/domain/DateFormatting.h"
 #include "ledgercore/domain/JournalEntry.h"
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/Money.h"
+#include "ledgercore/domain/Period.h"
 #include "ledgercore/formula/ComputedAccountName.h"
+#include "ledgercore/ledger/AccountingPeriod.h"
 #include "ledgercore/ledger/PostedJournalEntry.h"
 #include "ledgercore/persistence/PersistenceExceptions.h"
 #include "ledgercore/posting/PostingEngine.h"
@@ -33,8 +36,13 @@ namespace {
 //     contains a closing entry, so every snapshot without one stays
 //     byte-identical v1 and readable by v1-only builds; a v1-only build
 //     rejects a v2 file by version rather than misreading CLOSING.
+//
+// v3: v2 plus PERIOD records (Ledger accounting periods). Written only when
+//     the ledger defines at least one accounting period, so snapshots
+//     without periods keep their v1/v2 bytes.
 constexpr int kFormatVersionV1 = 1;
 constexpr int kFormatVersionWithClosing = 2;
+constexpr int kFormatVersionWithPeriods = 3;
 constexpr char kHeaderPrefix[] = "LEDGERCORE-SNAPSHOT v";
 
 // ---------------------------------------------------------------------
@@ -231,6 +239,14 @@ bool isSupportedDate(std::chrono::system_clock::time_point tp) {
            && tp < timePointFromEpochSeconds(kEndOfSupportedDatesEpochSeconds);
 }
 
+// A period may end exactly at the end of the supported range (its end is
+// exclusive), so its bounds are checked as [min, end] rather than with
+// isSupportedDate(); either way both convert to nanoseconds safely.
+bool isSupportedPeriod(const domain::Period& period) {
+    return period.start() >= timePointFromEpochSeconds(kMinSupportedDateEpochSeconds)
+           && period.end() <= timePointFromEpochSeconds(kEndOfSupportedDatesEpochSeconds);
+}
+
 // Precondition: isSupportedDate(tp), which guarantees the conversion to
 // nanoseconds below cannot overflow.
 std::int64_t nanosSinceEpoch(std::chrono::system_clock::time_point tp) {
@@ -270,7 +286,10 @@ void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, cons
     for (const ledger::PostedJournalEntry& posted : ledger.postedEntries()) {
         hasClosingEntry = hasClosingEntry || posted.entry().isClosing();
     }
-    out << kHeaderPrefix << (hasClosingEntry ? kFormatVersionWithClosing : kFormatVersionV1) << '\n';
+    const int version = !ledger.accountingPeriods().empty() ? kFormatVersionWithPeriods
+                        : hasClosingEntry                   ? kFormatVersionWithClosing
+                                                            : kFormatVersionV1;
+    out << kHeaderPrefix << version << '\n';
     out << "CURRENCY " << ledger.currency().code() << '\n';
 
     for (const domain::Account* root : chart.rootAccounts()) {
@@ -298,6 +317,20 @@ void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, cons
             out << (line.isDebit() ? "  DEBIT " : "  CREDIT ") << account->code().value() << ' '
                 << line.amount().minorUnits() << '\n';
         }
+    }
+
+    // After every ENTRY/CLOSING record, so on load the full history is
+    // replayed before any period is (re)closed -- see load().
+    for (const ledger::AccountingPeriod& accountingPeriod : ledger.accountingPeriods()) {
+        const domain::Period& period = accountingPeriod.period();
+        if (!isSupportedPeriod(period)) {
+            throw PersistenceException("Accounting period [" + domain::formatUtc(period.start()) + ", "
+                                       + domain::formatUtc(period.end())
+                                       + ") is outside the supported date range "
+                                         "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z]");
+        }
+        out << "PERIOD " << nanosSinceEpoch(period.start()) << ' ' << nanosSinceEpoch(period.end()) << ' '
+            << (accountingPeriod.isClosed() ? "CLOSED" : "OPEN") << '\n';
     }
 
     for (const computed::ComputedAccountDefinition* definition : computedAccounts.definitions()) {
@@ -477,7 +510,7 @@ LoadedSession load(const std::filesystem::path& path) {
     }
     const std::string versionText = headerLine.substr(std::char_traits<char>::length(kHeaderPrefix));
     const std::int64_t version = parseInt64Field(versionText, "header version", index + 1);
-    if (version != kFormatVersionV1 && version != kFormatVersionWithClosing) {
+    if (version != kFormatVersionV1 && version != kFormatVersionWithClosing && version != kFormatVersionWithPeriods) {
         throw PersistenceVersionException("unsupported snapshot version: " + versionText);
     }
     ++index;
@@ -542,6 +575,39 @@ LoadedSession load(const std::filesystem::path& path) {
                     isClosing ? domain::JournalEntry::createClosing(date, description, std::move(entryLines))
                               : domain::JournalEntry::create(date, description, std::move(entryLines));
                 posting::post(entry, *chart, *ledgerPtr);
+            } else if (recordType == "PERIOD") {
+                if (version < kFormatVersionWithPeriods) {
+                    throw PersistenceFormatException("PERIOD record at line " + std::to_string(lineNumber)
+                                                      + " requires snapshot format v3");
+                }
+                if (tokens.size() != 4) {
+                    throw PersistenceFormatException("malformed PERIOD record at line " + std::to_string(lineNumber));
+                }
+                const std::int64_t startNanos = parseInt64Field(tokens[1], "PERIOD start", lineNumber);
+                const std::int64_t endNanos = parseInt64Field(tokens[2], "PERIOD end", lineNumber);
+                if (startNanos < kMinSupportedNanos || startNanos >= kEndOfSupportedNanos
+                    || endNanos <= kMinSupportedNanos || endNanos > kEndOfSupportedNanos) {
+                    throw PersistenceFormatException("PERIOD bounds at line " + std::to_string(lineNumber)
+                                                      + " are outside the supported date range");
+                }
+                const std::string& state = tokens[3];
+                if (state != "OPEN" && state != "CLOSED") {
+                    throw PersistenceFormatException("unknown PERIOD state '" + state + "' at line "
+                                                      + std::to_string(lineNumber));
+                }
+                // Reconstructed through the Ledger's own API, so start >= end
+                // (domain::InvalidPeriodException), overlapping or duplicate
+                // periods (ledger::AccountingPeriodOverlapException) fail
+                // exactly as they would live. save() writes PERIOD records
+                // after every entry, so the whole history has already been
+                // replayed by posting::post() under the periods' Open state;
+                // a CLOSED period is closed only now, exactly as a live
+                // session closes a period after posting into it.
+                const domain::Period period(timePointFromNanos(startNanos), timePointFromNanos(endNanos));
+                ledgerPtr->defineAccountingPeriod(period);
+                if (state == "CLOSED") {
+                    ledgerPtr->closeAccountingPeriod(period);
+                }
             } else if (recordType == "COMPUTED") {
                 if (tokens.size() != 3) {
                     throw PersistenceFormatException("malformed COMPUTED record at line " + std::to_string(lineNumber));

@@ -10,6 +10,7 @@
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountId.h"
 #include "ledgercore/domain/AccountType.h"
+#include "ledgercore/domain/DateFormatting.h"
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/NormalBalance.h"
 #include "ledgercore/ledger/LedgerExceptions.h"
@@ -123,6 +124,12 @@ ledger::PostingId post(const domain::JournalEntry& entry,
         throw ledger::LedgerCurrencyMismatchException(
             "JournalEntry currency " + entry.currency().code() + " does not match Ledger currency "
             + ledger.currency().code());
+    }
+
+    if (const ledger::AccountingPeriod* closed = ledger.closedPeriodContaining(entry.date())) {
+        throw ClosedPeriodPostingException(
+            "Cannot post an entry dated " + domain::formatUtc(entry.date()) + " into closed accounting period ["
+            + domain::formatUtc(closed->period().start()) + ", " + domain::formatUtc(closed->period().end()) + ")");
     }
 
     std::vector<const domain::Account*> resolvedAccounts;

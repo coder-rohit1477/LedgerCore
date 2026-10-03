@@ -79,19 +79,26 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Invalid targets (non-Equity, group, unknown) and empty closes are rejected before the Ledger is touched
 - Repeated closing is decided by the journal itself — no hidden "closed" flag
 
+### Accounting Periods & Period Locking
+- Accounting periods are `[start, end)` business-date ranges owned by the `Ledger`, with a one-way `Open → Closed` lifecycle
+- `posting::post` rejects any entry — standard or closing — whose business date falls inside a closed period, before touching the Ledger
+- Overlapping or duplicate periods are rejected; adjacent periods and gaps are allowed
+- Locking never changes a balance, a posted entry, or any report — see [§6](#accounting-periods-and-period-locking)
+
 ### Persistence
-- Versioned, deterministic, line-oriented text snapshot (`LEDGERCORE-SNAPSHOT v1`, or `v2` when it contains a closing entry)
+- Versioned, deterministic, line-oriented text snapshot: `LEDGERCORE-SNAPSHOT v1`, `v2` when it contains a closing entry, `v3` when it defines accounting periods — always the lowest version that can represent the session
 - AccountCode is the persisted account identity; AccountIds are regenerated on load
 - Money written as exact integer minor units; strings quoted and escaped
 - Journal entries are replayed on load through `JournalEntry::create` / `createClosing` and `posting::post` — never written into a Ledger directly
-- Closing entries are written as `CLOSING` records (same layout as `ENTRY`) under a `v2` header; a snapshot without closing entries is still written byte-for-byte as `v1`, and both versions load
+- Closing entries are written as `CLOSING` records (same layout as `ENTRY`) under a `v2` header; a snapshot without closing entries is still written byte-for-byte as `v1`
+- Accounting periods are written as `PERIOD <start-ns> <end-ns> OPEN|CLOSED` records under a `v3` header, after every journal entry; all three versions load
 - All-or-nothing load: a malformed or invalid file throws and never yields a partial session
 - Atomic save: temporary file, flush, close, then rename over the target
 - Supported journal-entry dates: `[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)`; out-of-range dates are rejected on save, on load, and by the CLI, never clamped
 
 ### Command-Line Interface
 - `ledgercore` with no arguments starts an interactive REPL; `ledgercore --script <file>` runs commands from a file
-- Commands: `account`, `post`, `trial-balance`, `balance-sheet`, `income-statement`, `formula eval`, `computed`, `close`, `save`, `load`, `exit`
+- Commands: `account`, `post`, `trial-balance`, `balance-sheet`, `income-statement`, `formula eval`, `computed`, `close`, `period`, `save`, `load`, `exit`
 - Dates are `YYYY-MM-DD` (UTC midnight), validated against real calendar days and the supported range
 - `load` replaces the whole session atomically; a failed load leaves the current session untouched
 
@@ -154,7 +161,7 @@ cli (ledgercore executable) ──► persistence ──► posting, computed (�
 | Module | Responsibility | Dependencies |
 |---|---|---|
 | `domain` | Accounting primitives and invariants: `Account`, `ChartOfAccounts`, `Money`, `Currency`, `JournalEntry`, `Period`, and the single normal-balance sign convention | none (project-internal) |
-| `ledger` | Posted-state truth: one signed balance per account, plus an append-only history of posted entries | `domain` |
+| `ledger` | Posted-state truth: one signed balance per account, an append-only history of posted entries, and the accounting periods that govern which dates accept new postings | `domain` |
 | `posting` | The only component aware of both `JournalEntry` and `ChartOfAccounts`; validates and posts entries into a `Ledger` | `domain`, `ledger` |
 | `trialbalance` | Cumulative / as-of / period-scoped snapshot projections of a `ChartOfAccounts` + `Ledger` pair | `domain`, `ledger` |
 | `formula` | A small expression language (lexer, parser, AST, evaluator) over `Money` and exact `Rational` scalars | `domain` |
@@ -202,7 +209,7 @@ Sales 700 Cr, Rent 250 Dr  ──close──►  Dr Sales 700 · Cr Rent 250 · 
 The closing entry is dated one microsecond before `cutoff` (`domain::kClosingCutoffOffset` — exactly representable on every supported platform, so the same close is persisted identically everywhere), so afterwards `generateAsOf(cutoff)` is a post-closing trial balance (temporary accounts zero, retained earnings holding the result), while anything dated at or after `cutoff` belongs to the next period.
 
 - **Reports.** Trial balances and balance sheets include closing entries (post-closing view). Income statements exclude them (`trialbalance::ClosingEntries::Exclude`), so a closed year's income statement still reports its revenue, expenses, and net income.
-- **Repeated closing.** A second close with the same cutoff finds every temporary balance already zero and throws `NothingToCloseException`; nothing is posted. If backdated activity is posted into an already-closed range, closing that cutoff again closes exactly the residual. There is no separate "period closed" state, and nothing prevents posting into a closed range.
+- **Repeated closing.** A second close with the same cutoff finds every temporary balance already zero and throws `NothingToCloseException`; nothing is posted. If backdated activity is posted into an already-closed range, closing that cutoff again closes exactly the residual — unless the range has also been *locked* as a closed accounting period ([§6](#accounting-periods-and-period-locking)), in which case such backdated postings are rejected in the first place.
 - **Guard rail.** Because income statements exclude closing entries, `posting::post` accepts a closing-kind entry only if it is exactly a complete close: Revenue/Expense/Equity accounts only, each account at most once, at most one Equity destination, and every Revenue/Expense balance brought to zero as of the entry's cutoff (its date + 1µs). Partial, reversed, split, or padded "closing" entries are rejected — whether posted live or replayed from a hand-edited snapshot — so the marker can never hide or reshape ordinary activity.
 
 ## 6. Period Semantics
@@ -224,6 +231,27 @@ This produces two distinct report shapes:
 - **`TrialBalance::generateForPeriod(period)`** — "for" a period: includes every entry whose business date falls inside `[period.start(), period.end())`.
 
 `TrialBalance::generate(...)` (the original, cumulative form) is unchanged by this: it still reflects the Ledger's full running balance, with no date filtering at all.
+
+### Accounting Periods and Period Locking
+
+An accounting period is a `domain::Period` — the same `[start, end)` business-date range `generateForPeriod` uses — registered on a `Ledger` with a state:
+
+```
+ledger.defineAccountingPeriod(Period(2027-01-01, 2028-01-01));   // Open
+ledger.closeAccountingPeriod(Period(2027-01-01, 2028-01-01));    // Open -> Closed
+```
+
+- **Identity and shape.** A period is identified by its exact `[start, end)` bounds. Periods may not overlap (or duplicate), so no date ever belongs to two periods; adjacent periods and gaps are allowed, and periods may be defined in any order (they are kept, listed, and persisted in start order).
+- **Lifecycle.** `Open → Closed`, one way. Closing an undefined period or closing twice is rejected. **Reopening is not supported**: there is no API for it, and redefining a closed range is rejected as an overlap.
+- **What a closed period prevents.** `posting::post` rejects (`ClosedPeriodPostingException`) every entry — standard or closing — whose business date lies inside a closed period, before any Ledger mutation; the message names the posting date and the period. An entry dated exactly at the period's `end` belongs to the next period and is accepted. Open periods and dates outside every period are unrestricted.
+- **What it does not do.** A lock is metadata about future postings only. It never changes a balance, a posted entry, a trial balance, a balance sheet, or an income statement — locking is not a reporting filter.
+
+**Closing entries and period locking are separate operations.** *Closing entries transfer temporary-account balances* into retained earnings; *closing a period prevents subsequent postings into that period*. Neither implies the other:
+
+- A period can be locked without a closing entry — e.g. lock months as they finish and close Revenue/Expense only at year end. The temporary balances simply stay open until a later close.
+- A closing entry for cutoff `C` is dated `C − 1µs`, inside the period ending at `C`, so it must be posted **before** that period is locked. The supported year-end workflow is therefore: `close` the year, *then* lock the year's last period. Closing into an already-locked period is rejected like any other posting into it.
+
+Snapshots persist each period and its state (format `v3`). Loading replays the whole journal first and only then re-applies the periods, so entries dated inside a closed period — necessarily posted before it was closed — load normally, while a hand-edited file that closes a period *before* an entry inside it is rejected.
 
 ## 7. Formula / Computed Account Example
 
@@ -265,20 +293,20 @@ The Formula Engine has no knowledge of `ComputedAccountRegistry`, `ChartOfAccoun
 
 ## 8. Testing
 
-**611 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
+**657 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
 
 | Module | Tests |
 |---|---|
-| domain (Account, ChartOfAccounts, Money, JournalEntry, NormalBalance, Period) | 127 |
-| ledger | 6 |
-| posting | 44 |
+| domain (Account, ChartOfAccounts, Money, JournalEntry, NormalBalance, Period, date formatting) | 131 |
+| ledger | 18 |
+| posting | 54 |
 | formula (Lexer, Rational, Parser, Evaluator) | 112 |
 | computed | 38 |
 | trialbalance | 52 |
 | reporting | 30 |
-| closing | 36 |
-| persistence | 65 |
-| cli (input parsing, command parsing, session, process-level end-to-end) | 100 |
+| closing | 40 |
+| persistence | 74 |
+| cli (input parsing, command parsing, session, process-level end-to-end) | 107 |
 | smoke | 1 |
 
 The suite mixes unit, integration, and property-style tests, targeted at the invariants the domain actually cares about rather than at raw line coverage:
@@ -290,6 +318,7 @@ The suite mixes unit, integration, and property-style tests, targeted at the inv
 - computed-account cycle detection, including diamond dependencies that are *not* cycles
 - period boundary behavior (`[start, end)` edges, adjacent-period tiling, backdated entries)
 - reporting equations (Balance Sheet / Income Statement identities hold after randomized posting sequences)
+- accounting periods (overlap rules, one-way lifecycle, `[start, end)` lock boundaries, atomic rejection of backdated postings, report invariance under locking, v3 persistence and hand-edited period records)
 - closing entries (sign correctness for every account type, net income/loss, contra balances, invalid targets, atomic failure, repeated and multi-year closing, report consistency before and after closing)
 - persistence round trips (save → load → save is byte-identical), corruption and version handling, failed-load isolation, date-range boundaries
 - CLI behavior through the real executable (exit codes, REPL vs. script error handling, save/load)
@@ -358,10 +387,13 @@ computed define --name GrossProfit --formula "#4000"
 save books.snapshot
 ```
 
-Closing a year into retained earnings (account `3100`, an Equity account) — all Revenue/Expense activity before 2027-01-01:
+Closing a year into retained earnings (account `3100`, an Equity account) — all Revenue/Expense activity before 2027-01-01 — and then locking that year against further postings (`--end` is exclusive):
 
 ```
+period create --start 2026-01-01 --end 2027-01-01
 close --retained-earnings 3100 --as-of 2027-01-01
+period close --start 2026-01-01 --end 2027-01-01
+period list
 ```
 
 In the REPL, a failing command prints `error: ...` and the session continues. In `--script` mode the first failing command stops the run with exit code `1` (command syntax, a malformed date or amount, a date outside the supported range, or a snapshot file problem) or `2` (a rule enforced by the engine, e.g. an unbalanced entry, an unknown account, or posting to a group account); `3` means an unexpected internal error. A script that completes exits `0`.
@@ -419,9 +451,9 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 ## 12. Current Status
 
-Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, snapshot persistence, and the `ledgercore` CLI.
+Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, snapshot persistence, and the `ledgercore` CLI.
 
-- 611 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
+- 657 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 
@@ -431,7 +463,7 @@ This is not a claim of production readiness — see [Overview](#1-overview).
 
 Reasonable, currently-unimplemented future work:
 
-- An explicit "period locked" state that rejects new postings into a closed range (today a backdated posting is allowed and simply leaves a residual for the next close)
+- Reopening a closed accounting period (deliberately unsupported today: `Open → Closed` is one-way)
 - Recursion-depth hardening in the formula parser and computed-account dependency resolution, before either would ever accept untrusted input
 - Richer fiscal-period abstractions (e.g. named fiscal calendars) built on top of the existing `Period` primitive
 - Additional reporting capabilities (e.g. comparative periods, cash flow statement)

@@ -16,4 +16,26 @@ public:
     explicit LedgerCurrencyMismatchException(const std::string& message) : LedgerException(message) {}
 };
 
+// Ledger::defineAccountingPeriod(): the new period overlaps (or
+// duplicates) an existing one. Every business date belongs to at most one
+// accounting period, so no date can ever match two conflicting states.
+class AccountingPeriodOverlapException : public ledgercore::LedgerException {
+public:
+    explicit AccountingPeriodOverlapException(const std::string& message) : LedgerException(message) {}
+};
+
+// Ledger::closeAccountingPeriod(): no defined period has exactly the given
+// [start, end) bounds.
+class UnknownAccountingPeriodException : public ledgercore::LedgerException {
+public:
+    explicit UnknownAccountingPeriodException(const std::string& message) : LedgerException(message) {}
+};
+
+// Ledger::closeAccountingPeriod(): the period is already closed. Closing is
+// a one-way transition; there is no reopen.
+class AccountingPeriodAlreadyClosedException : public ledgercore::LedgerException {
+public:
+    explicit AccountingPeriodAlreadyClosedException(const std::string& message) : LedgerException(message) {}
+};
+
 } // namespace ledgercore::ledger

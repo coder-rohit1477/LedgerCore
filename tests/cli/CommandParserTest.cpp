@@ -229,3 +229,28 @@ TEST(CommandParserTest, CloseRejectsUnknownFlagsAndPositionals) {
     EXPECT_THROW(parseLine("close --retained-earnings 3100 --retained-earnings 3200 --as-of 2027-01-01"),
                  CliUsageError);
 }
+
+TEST(CommandParserTest, ValidPeriodCreateCloseAndList) {
+    const auto create = parseLine("period create --start 2027-01-01 --end 2028-01-01");
+    ASSERT_TRUE(create.has_value());
+    EXPECT_EQ(create->kind, CommandKind::PeriodCreate);
+    EXPECT_EQ(create->periodStart, "2027-01-01");
+    EXPECT_EQ(create->periodEnd, "2028-01-01");
+
+    const auto close = parseLine("period close --start 2027-01-01 --end 2028-01-01");
+    ASSERT_TRUE(close.has_value());
+    EXPECT_EQ(close->kind, CommandKind::PeriodClose);
+
+    const auto list = parseLine("period list");
+    ASSERT_TRUE(list.has_value());
+    EXPECT_EQ(list->kind, CommandKind::PeriodList);
+}
+
+TEST(CommandParserTest, PeriodCommandsRejectMissingOrUnknownArguments) {
+    EXPECT_THROW(parseLine("period"), CliUsageError);
+    EXPECT_THROW(parseLine("period reopen --start 2027-01-01 --end 2028-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("period create --start 2027-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("period close --end 2028-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("period create --start 2027-01-01 --end 2028-01-01 --state closed"), CliUsageError);
+    EXPECT_THROW(parseLine("period list --all"), CliUsageError);
+}

@@ -4,6 +4,7 @@
 #include <string>
 
 #include "ledgercore/domain/AccountType.h"
+#include "ledgercore/domain/DateFormatting.h"
 #include "ledgercore/domain/Money.h"
 #include "ledgercore/reporting/ReportLine.h"
 
@@ -115,6 +116,20 @@ void printAccountDetail(std::ostream& out, const domain::Account& account) {
     out << "kind:   " << (account.isLeaf() ? "leaf" : "group") << (account.isRoot() ? ", root" : "") << "\n";
     if (account.parent() != nullptr) {
         out << "parent: " << account.parent()->code().value() << "\n";
+    }
+}
+
+void printAccountingPeriods(std::ostream& out, const ledger::Ledger& ledger) {
+    if (ledger.accountingPeriods().empty()) {
+        out << "no accounting periods defined\n";
+        return;
+    }
+    out << std::left << std::setw(kCodeWidth + 2) << "START" << std::setw(kCodeWidth + 2) << "END (excl.)"
+        << "STATE\n";
+    for (const ledger::AccountingPeriod& period : ledger.accountingPeriods()) {
+        out << std::left << std::setw(kCodeWidth + 2) << domain::formatUtc(period.period().start())
+            << std::setw(kCodeWidth + 2) << domain::formatUtc(period.period().end())
+            << (period.isClosed() ? "closed" : "open") << "\n";
     }
 }
 

@@ -34,6 +34,15 @@ public:
     explicit InvalidClosingEntryException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown by post() when the entry's business date lies inside a Closed
+// accounting period of the target Ledger ([start, end), see
+// Ledger::closeAccountingPeriod). Applies to every entry kind, closing
+// entries included; nothing is posted.
+class ClosedPeriodPostingException : public ledgercore::LedgerException {
+public:
+    explicit ClosedPeriodPostingException(const std::string& message) : LedgerException(message) {}
+};
+
 // Thrown by posting::addChildAccount() when the would-be parent already
 // has posting history in the Ledger: giving it a child would turn a
 // posted leaf into a group account, which can no longer be a posting

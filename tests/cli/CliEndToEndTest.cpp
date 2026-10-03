@@ -550,3 +550,86 @@ TEST(CliEndToEndTest, ClosedSessionSavesAsV2AndReloadsWithSameReports) {
     EXPECT_NE(lineContaining(result.output, "Net Income", is).find("450.00 USD"), std::string::npos);
     EXPECT_NE(lineContaining(result.output, "RetainedEarnings", is).find("450.00 USD"), std::string::npos);
 }
+
+// ---------------------------------------------------------------------
+// Phase 18: accounting periods
+// ---------------------------------------------------------------------
+
+TEST(CliEndToEndTest, PeriodCreateCloseListAndBackdatedPostingRejected) {
+    const RunResult result = runScript(std::string(kYearOneScript)
+                                       + "period create --start 2026-01-01 --end 2027-01-01\n"
+                                         "period create --start 2027-01-01 --end 2028-01-01\n"
+                                         "close --retained-earnings 3100 --as-of 2027-01-01\n"
+                                         "period close --start 2026-01-01 --end 2027-01-01\n"
+                                         "period list\n"
+                                         "post --date 2027-01-01 --description next-year --debit 1000:5.00 --credit 4000:5.00\n"
+                                         "post --date 2026-12-31 --description backdated --debit 1000:5.00 --credit 4000:5.00\n");
+
+    EXPECT_EQ(result.exitCode, 2) << result.output;
+    const std::string& out = result.output;
+    EXPECT_NE(out.find("created accounting period [2026-01-01, 2027-01-01) (open)"), std::string::npos) << out;
+    EXPECT_NE(out.find("posted closing entry"), std::string::npos);
+    EXPECT_NE(out.find("closed accounting period [2026-01-01, 2027-01-01)"), std::string::npos);
+    EXPECT_NE(out.find("2026-01-01  2027-01-01  closed"), std::string::npos) << out;
+    EXPECT_NE(out.find("2027-01-01  2028-01-01  open"), std::string::npos) << out;
+    EXPECT_NE(out.find("posted entry #5"), std::string::npos);  // dated at the closed period's end: allowed
+    EXPECT_NE(out.find("Cannot post an entry dated 2026-12-31 into closed accounting period "
+                       "[2026-01-01, 2027-01-01)"),
+              std::string::npos)
+        << out;
+    EXPECT_EQ(out.find("posted entry #6"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, PeriodListWithNoPeriods) {
+    const RunResult result = runScript("period list\n");
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_NE(result.output.find("no accounting periods defined"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, InvalidPeriodLifecycleOperationsUseAccountingExitCode) {
+    const RunResult closeUndefined = runScript("period close --start 2026-01-01 --end 2027-01-01\n");
+    EXPECT_EQ(closeUndefined.exitCode, 2);
+    EXPECT_NE(closeUndefined.output.find("No accounting period is defined"), std::string::npos);
+
+    const RunResult closeTwice = runScript("period create --start 2026-01-01 --end 2027-01-01\n"
+                                           "period close --start 2026-01-01 --end 2027-01-01\n"
+                                           "period close --start 2026-01-01 --end 2027-01-01\n");
+    EXPECT_EQ(closeTwice.exitCode, 2);
+    EXPECT_NE(closeTwice.output.find("already closed"), std::string::npos);
+
+    const RunResult overlap = runScript("period create --start 2026-01-01 --end 2027-01-01\n"
+                                        "period create --start 2026-06-01 --end 2027-06-01\n");
+    EXPECT_EQ(overlap.exitCode, 2);
+    EXPECT_NE(overlap.output.find("overlaps"), std::string::npos);
+
+    const RunResult backwards = runScript("period create --start 2027-01-01 --end 2026-01-01\n");
+    EXPECT_EQ(backwards.exitCode, 2);
+}
+
+TEST(CliEndToEndTest, InvalidPeriodDatesUseUsageExitCode) {
+    EXPECT_EQ(runScript("period create --start 2026-02-30 --end 2027-01-01\n").exitCode, 1);
+    EXPECT_EQ(runScript("period create --start 2026-01-01 --end 2300-01-01\n").exitCode, 1);
+    EXPECT_EQ(runScript("period create --start 2026-01-01\n").exitCode, 1);
+}
+
+TEST(CliEndToEndTest, ClosedPeriodSurvivesSaveAndLoad) {
+    const std::string snapshotPath = uniqueTempPath("period_snapshot");
+    const RunResult result = runRepl(std::string(kYearOneScript)
+                                     + "period create --start 2026-01-01 --end 2027-01-01\n"
+                                       "period close --start 2026-01-01 --end 2027-01-01\n"
+                                       "save " + snapshotPath + "\n"
+                                       "load " + snapshotPath + "\n"
+                                       "period list\n"
+                                       "post --date 2026-06-15 --description backdated --debit 1000:1.00 --credit 4000:1.00\n"
+                                       "exit\n");
+    std::ifstream snapshot(snapshotPath);
+    std::string header;
+    std::getline(snapshot, header);
+    std::remove(snapshotPath.c_str());
+
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_EQ(header, "LEDGERCORE-SNAPSHOT v3");
+    EXPECT_NE(result.output.find("Loaded LedgerCore session from"), std::string::npos) << result.output;
+    EXPECT_NE(result.output.find("2026-01-01  2027-01-01  closed"), std::string::npos) << result.output;
+    EXPECT_NE(result.output.find("into closed accounting period"), std::string::npos);
+}

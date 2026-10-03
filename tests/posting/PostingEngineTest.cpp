@@ -18,6 +18,7 @@
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/Money.h"
 #include "ledgercore/domain/NormalBalance.h"
+#include "ledgercore/domain/Period.h"
 #include "ledgercore/ledger/Ledger.h"
 #include "ledgercore/ledger/LedgerExceptions.h"
 #include "ledgercore/ledger/PostedJournalEntry.h"
@@ -46,6 +47,7 @@ using ledgercore::domain::DuplicateAccountCodeException;
 using ledgercore::domain::ForeignAccountException;
 using ledgercore::domain::InvalidAccountException;
 using ledgercore::posting::addChildAccount;
+using ledgercore::posting::ClosedPeriodPostingException;
 using ledgercore::posting::InvalidClosingEntryException;
 using ledgercore::posting::InvalidPostingTargetException;
 using ledgercore::posting::post;
@@ -1025,4 +1027,134 @@ TEST(PostingEngineTest, SecondClosingEntryForAnAlreadyClosedCutoffIsRejected) {
     y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100)});
     EXPECT_THROW(y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100)}), InvalidClosingEntryException);
     EXPECT_EQ(y.historySize(), 3u);
+}
+
+// ---------------------------------------------------------------------
+// Accounting-period lock: post() rejects entries dated in a Closed period
+// ---------------------------------------------------------------------
+
+namespace {
+
+// OpenYear (Capital 1000 on day 1, Sales 100 on day 10) with the period
+// [day 0, day 365) defined and closed -- its history was posted while open.
+struct LockedYear : OpenYear {
+    const ledgercore::domain::Period year{day(0), day(365)};
+    LockedYear() {
+        ledger.defineAccountingPeriod(year);
+        ledger.closeAccountingPeriod(year);
+    }
+    void postSale(std::chrono::system_clock::time_point date, std::int64_t major) {
+        postStandard(date, cash, sales, major);
+    }
+};
+
+} // namespace
+
+TEST(PostingEngineTest, PostingBeforeAClosedPeriodSucceeds) {
+    OpenYear y;
+    y.ledger.defineAccountingPeriod(ledgercore::domain::Period(day(100), day(200)));
+    y.ledger.closeAccountingPeriod(ledgercore::domain::Period(day(100), day(200)));
+    y.postStandard(day(99), y.cash, y.sales, 5);
+    y.postStandard(day(100) - std::chrono::microseconds(1), y.cash, y.sales, 5);
+    EXPECT_EQ(y.historySize(), 4u);
+}
+
+TEST(PostingEngineTest, PostingAtClosedPeriodStartIsRejected) {
+    LockedYear y;
+    EXPECT_THROW(y.postSale(day(0), 5), ClosedPeriodPostingException);
+}
+
+TEST(PostingEngineTest, PostingInsideClosedPeriodIsRejected) {
+    LockedYear y;
+    EXPECT_THROW(y.postSale(day(200), 5), ClosedPeriodPostingException);
+    EXPECT_THROW(y.postSale(day(365) - std::chrono::microseconds(1), 5), ClosedPeriodPostingException);
+}
+
+TEST(PostingEngineTest, PostingAtClosedPeriodEndSucceedsBecauseEndIsExclusive) {
+    LockedYear y;
+    y.postSale(day(365), 5);
+    EXPECT_EQ(y.historySize(), 3u);
+    EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(105, 0, y.usd));
+}
+
+TEST(PostingEngineTest, PostingAfterClosedPeriodSucceeds) {
+    LockedYear y;
+    y.postSale(day(400), 5);
+    EXPECT_EQ(y.historySize(), 3u);
+}
+
+TEST(PostingEngineTest, RejectedBackdatedPostingLeavesLedgerHistoryAndPeriodUnchanged) {
+    LockedYear y;
+    const Money cashBefore = y.ledger.balance(y.cash);
+    const Money salesBefore = y.ledger.balance(y.sales);
+    const std::size_t historyBefore = y.historySize();
+
+    try {
+        y.postSale(day(50), 999);
+        FAIL() << "expected ClosedPeriodPostingException";
+    } catch (const ClosedPeriodPostingException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("1970-02-20"), std::string::npos) << message;              // posting date (day 50)
+        EXPECT_NE(message.find("[1970-01-01, 1971-01-01)"), std::string::npos) << message;  // closed period
+    }
+
+    EXPECT_EQ(y.ledger.balance(y.cash), cashBefore);
+    EXPECT_EQ(y.ledger.balance(y.sales), salesBefore);
+    EXPECT_EQ(y.historySize(), historyBefore);
+    ASSERT_EQ(y.ledger.accountingPeriods().size(), 1u);
+    EXPECT_TRUE(y.ledger.accountingPeriods()[0].isClosed());
+}
+
+TEST(PostingEngineTest, PeriodLockAndOtherValidationFailuresNeverPartiallyMutate) {
+    LockedYear y;
+    const std::size_t historyBefore = y.historySize();
+    const Money cashBefore = y.ledger.balance(y.cash);
+    // Unknown account, dated after the lock: fails for the other reason.
+    EXPECT_THROW(post(JournalEntry::create(day(400), "Bad",
+                                           {y.dr(y.cash, 5), JournalEntryLine::credit(AccountId(9999),
+                                                                                      Money::fromMajorUnits(5, 0, y.usd))}),
+                      y.chart, y.ledger),
+                 AccountNotFoundException);
+    // Unknown account *and* dated inside the lock: the lock is reported.
+    EXPECT_THROW(post(JournalEntry::create(day(50), "Bad",
+                                           {y.dr(y.cash, 5), JournalEntryLine::credit(AccountId(9999),
+                                                                                      Money::fromMajorUnits(5, 0, y.usd))}),
+                      y.chart, y.ledger),
+                 ClosedPeriodPostingException);
+    EXPECT_EQ(y.historySize(), historyBefore);
+    EXPECT_EQ(y.ledger.balance(y.cash), cashBefore);
+    EXPECT_TRUE(y.ledger.accountingPeriods()[0].isClosed());
+}
+
+TEST(PostingEngineTest, OpenPeriodDoesNotRestrictPosting) {
+    OpenYear y;
+    y.ledger.defineAccountingPeriod(ledgercore::domain::Period(day(0), day(365)));
+    y.postStandard(day(50), y.cash, y.sales, 5);
+    EXPECT_EQ(y.historySize(), 3u);
+}
+
+TEST(PostingEngineTest, MultipleClosedPeriodsEachRejectAndGapsAndOpenPeriodsAccept) {
+    OpenYear y;
+    using ledgercore::domain::Period;
+    y.ledger.defineAccountingPeriod(Period(day(100), day(200)));  // closed
+    y.ledger.defineAccountingPeriod(Period(day(200), day(300)));  // adjacent, stays open
+    y.ledger.defineAccountingPeriod(Period(day(400), day(500)));  // closed, after a gap
+    y.ledger.closeAccountingPeriod(Period(day(100), day(200)));
+    y.ledger.closeAccountingPeriod(Period(day(400), day(500)));
+
+    EXPECT_THROW(y.postStandard(day(150), y.cash, y.sales, 1), ClosedPeriodPostingException);
+    EXPECT_THROW(y.postStandard(day(450), y.cash, y.sales, 1), ClosedPeriodPostingException);
+    y.postStandard(day(250), y.cash, y.sales, 1);  // inside the open period
+    y.postStandard(day(350), y.cash, y.sales, 1);  // between closed periods (gap)
+    y.postStandard(day(500), y.cash, y.sales, 1);  // end of the latest closed period
+    y.postStandard(day(600), y.cash, y.sales, 1);  // after every period
+    EXPECT_EQ(y.historySize(), 6u);
+}
+
+TEST(PostingEngineTest, BackdatedClosingEntryIntoClosedPeriodIsRejected) {
+    LockedYear y;
+    // A complete, otherwise-valid closing entry dated inside the lock.
+    EXPECT_THROW(y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100)}), ClosedPeriodPostingException);
+    EXPECT_EQ(y.historySize(), 2u);
+    EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(100, 0, y.usd));
 }
