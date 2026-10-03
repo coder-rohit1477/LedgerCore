@@ -319,8 +319,9 @@ void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, cons
         }
     }
 
-    // After every ENTRY/CLOSING record, so on load the full history is
-    // replayed before any period is (re)closed -- see load().
+    // Written after every journal record, in start order. The position is
+    // cosmetic: load() applies periods only after replaying the whole
+    // journal, wherever they appear.
     for (const ledger::AccountingPeriod& accountingPeriod : ledger.accountingPeriods()) {
         const domain::Period& period = accountingPeriod.period();
         if (!isSupportedPeriod(period)) {
@@ -532,6 +533,17 @@ LoadedSession load(const std::filesystem::path& path) {
         auto ledgerPtr = std::make_unique<ledger::Ledger>(currency);
         auto registry = std::make_unique<computed::ComputedAccountRegistry>();
 
+        // A snapshot is a final-state snapshot: PERIOD records say which
+        // periods exist and whether each is *currently* closed, not when it
+        // was closed. So periods are validated as they are read but applied
+        // only after every journal record has been replayed (see below);
+        // where a PERIOD record sits in the file carries no meaning.
+        struct PendingPeriod {
+            domain::Period period;
+            bool closed;
+        };
+        std::vector<PendingPeriod> pendingPeriods;
+
         while (true) {
             skipBlank();
             if (index >= lines.size()) {
@@ -595,19 +607,11 @@ LoadedSession load(const std::filesystem::path& path) {
                     throw PersistenceFormatException("unknown PERIOD state '" + state + "' at line "
                                                       + std::to_string(lineNumber));
                 }
-                // Reconstructed through the Ledger's own API, so start >= end
-                // (domain::InvalidPeriodException), overlapping or duplicate
-                // periods (ledger::AccountingPeriodOverlapException) fail
-                // exactly as they would live. save() writes PERIOD records
-                // after every entry, so the whole history has already been
-                // replayed by posting::post() under the periods' Open state;
-                // a CLOSED period is closed only now, exactly as a live
-                // session closes a period after posting into it.
-                const domain::Period period(timePointFromNanos(startNanos), timePointFromNanos(endNanos));
-                ledgerPtr->defineAccountingPeriod(period);
-                if (state == "CLOSED") {
-                    ledgerPtr->closeAccountingPeriod(period);
-                }
+                // start >= end fails here (domain::InvalidPeriodException);
+                // overlaps and duplicates fail when the periods are applied.
+                pendingPeriods.push_back(
+                    PendingPeriod{domain::Period(timePointFromNanos(startNanos), timePointFromNanos(endNanos)),
+                                  state == "CLOSED"});
             } else if (recordType == "COMPUTED") {
                 if (tokens.size() != 3) {
                     throw PersistenceFormatException("malformed COMPUTED record at line " + std::to_string(lineNumber));
@@ -616,6 +620,22 @@ LoadedSession load(const std::filesystem::path& path) {
             } else {
                 throw PersistenceFormatException("unknown record type '" + recordType + "' at line "
                                                   + std::to_string(lineNumber));
+            }
+        }
+
+        // The whole journal has now been replayed through posting::post()
+        // with no period closed. Restore the final period state through the
+        // Ledger's own API, so overlapping or duplicate periods
+        // (ledger::AccountingPeriodOverlapException) fail exactly as they
+        // would live. Entries dated inside a now-closed period are
+        // legitimate history: the format records only that the period is
+        // closed, which governs postings made after this load.
+        for (const PendingPeriod& pending : pendingPeriods) {
+            ledgerPtr->defineAccountingPeriod(pending.period);
+        }
+        for (const PendingPeriod& pending : pendingPeriods) {
+            if (pending.closed) {
+                ledgerPtr->closeAccountingPeriod(pending.period);
             }
         }
 

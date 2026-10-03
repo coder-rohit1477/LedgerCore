@@ -1663,16 +1663,157 @@ TEST(SessionStoreTest, HandEditedPeriodRecordsThatAreMalformedAreRejected) {
     }
 }
 
-TEST(SessionStoreTest, ClosedPeriodPlacedBeforeAnEntryInsideItIsRejected) {
-    // A legitimate snapshot always lists periods after the history; a file
-    // that closes a period and then "adds" an entry dated inside it
-    // describes a posting the live system would have refused.
-    const ScopedTempFile file(uniqueTempPath("closed_before_entry"));
-    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v3\nCURRENCY USD\n"
-                              "ACCOUNT ROOT 1000 Asset \"Cash\"\nACCOUNT ROOT 4000 Revenue \"Sales\"\n"
-                              "PERIOD " + nanosText(day(0)) + " " + nanosText(day(100)) + " CLOSED\n"
-                              "ENTRY " + nanosText(day(10)) + " \"Sale\"\n  DEBIT 1000 100\n  CREDIT 4000 100\n");
-    EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::posting::ClosedPeriodPostingException);
+namespace {
+
+// Post one sale of `major` units dated `date` into a (chart, ledger) whose
+// accounts include Cash 1000 and Revenue 4000.
+void postSale(const ChartOfAccounts& chart, Ledger& ledger, std::chrono::system_clock::time_point date,
+              std::int64_t major) {
+    const Currency usd("USD");
+    post(JournalEntry::create(date, "Sale",
+                               {JournalEntryLine::debit(chart.findByCode(AccountCode("1000"))->id(),
+                                                        Money::fromMajorUnits(major, 0, usd)),
+                                JournalEntryLine::credit(chart.findByCode(AccountCode("4000"))->id(),
+                                                         Money::fromMajorUnits(major, 0, usd))}),
+         chart, ledger);
+}
+
+void expectSameJournal(const Ledger& lhs, const Ledger& rhs) {
+    ASSERT_EQ(lhs.postedEntries().size(), rhs.postedEntries().size());
+    for (std::size_t i = 0; i < lhs.postedEntries().size(); ++i) {
+        const JournalEntry& a = lhs.postedEntries()[i].entry();
+        const JournalEntry& b = rhs.postedEntries()[i].entry();
+        EXPECT_EQ(a.date(), b.date()) << i;
+        EXPECT_EQ(a.description(), b.description()) << i;
+        EXPECT_EQ(a.kind(), b.kind()) << i;
+        EXPECT_EQ(a.totalDebits(), b.totalDebits()) << i;
+        ASSERT_EQ(a.lines().size(), b.lines().size()) << i;
+    }
+}
+
+} // namespace
+
+TEST(SessionStoreTest, SnapshotsAreFinalStateSoPeriodRecordPositionCarriesNoMeaning) {
+    // HISTORY A (live, valid): define [day0, day100), post on day 10, close.
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    const Period period(day(0), day(100));
+    ledger.defineAccountingPeriod(period);
+    postSale(chart, ledger, day(10), 7);
+    ledger.closeAccountingPeriod(period);
+
+    // HISTORY B (live, invalid): with the period already closed, the same
+    // posting is refused -- so no session can ever save that ordering.
+    {
+        ChartOfAccounts chartB;
+        setUpStandardChart(chartB);
+        Ledger ledgerB(usd);
+        ledgerB.defineAccountingPeriod(period);
+        ledgerB.closeAccountingPeriod(period);
+        EXPECT_THROW(postSale(chartB, ledgerB, day(10), 7), ledgercore::posting::ClosedPeriodPostingException);
+        EXPECT_TRUE(ledgerB.postedEntries().empty());
+    }
+
+    // The snapshot records only the final state (the entry, and that the
+    // period is now CLOSED) -- never when the close happened. Moving the
+    // PERIOD record ahead of the ENTRY record is therefore the same
+    // snapshot, and loads to the same state.
+    const ScopedTempFile file(uniqueTempPath("final_state"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    const std::string saved = readRawFile(file.path());
+    const std::size_t periodPos = saved.find("PERIOD ");
+    const std::size_t entryPos = saved.find("ENTRY ");
+    ASSERT_NE(periodPos, std::string::npos);
+    ASSERT_LT(entryPos, periodPos);  // save() writes periods last (cosmetic)
+    const std::string periodLine = saved.substr(periodPos, saved.find('\n', periodPos) + 1 - periodPos);
+    std::string reordered = saved;
+    reordered.erase(periodPos, periodLine.size());
+    reordered.insert(entryPos, periodLine);
+    ASSERT_NE(reordered, saved);
+
+    const ScopedTempFile reorderedFile(uniqueTempPath("final_state_reordered"));
+    writeRawFile(reorderedFile.path(), reordered);
+    LoadedSession asSaved = ledgercore::persistence::load(file.path());
+    LoadedSession asReordered = ledgercore::persistence::load(reorderedFile.path());
+
+    expectSameJournal(*asSaved.ledger, *asReordered.ledger);
+    for (const LoadedSession* loaded : {&asSaved, &asReordered}) {
+        ASSERT_EQ(loaded->ledger->accountingPeriods().size(), 1u);
+        EXPECT_TRUE(loaded->ledger->accountingPeriods()[0].isClosed());
+        // The restored lock governs postings made after the load.
+        EXPECT_THROW(postSale(*loaded->chart, *loaded->ledger, day(20), 1),
+                     ledgercore::posting::ClosedPeriodPostingException);
+    }
+}
+
+TEST(SessionStoreTest, CloseAfterPostingRoundTripPreservesHistoryPeriodsReportsAndTheLock) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    const Period period(day(0), day(100));
+    ledger.defineAccountingPeriod(period);                 // 1. create period
+    postSale(chart, ledger, day(0), 11);                   // 2. historical entries, incl. at start
+    postSale(chart, ledger, day(100) - std::chrono::microseconds(1), 13);
+    ledger.closeAccountingPeriod(period);                  // 3. close
+
+    const ScopedTempFile file(uniqueTempPath("close_after_posting"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());  // 4. save
+    LoadedSession loaded = ledgercore::persistence::load(file.path());    // 5. load
+
+    // 6. history, period definition and state, reports
+    expectSameJournal(ledger, *loaded.ledger);
+    ASSERT_EQ(loaded.ledger->accountingPeriods().size(), 1u);
+    EXPECT_EQ(loaded.ledger->accountingPeriods()[0].period().start(), day(0));
+    EXPECT_EQ(loaded.ledger->accountingPeriods()[0].period().end(), day(100));
+    EXPECT_TRUE(loaded.ledger->accountingPeriods()[0].isClosed());
+    EXPECT_EQ(TrialBalance::generateForPeriod(chart, ledger, period).totalDebits(),
+              TrialBalance::generateForPeriod(*loaded.chart, *loaded.ledger, period).totalDebits());
+    EXPECT_EQ(IncomeStatement::generate(TrialBalance::generate(chart, ledger)).netIncome(),
+              IncomeStatement::generate(TrialBalance::generate(*loaded.chart, *loaded.ledger)).netIncome());
+    EXPECT_EQ(BalanceSheet::generate(TrialBalance::generate(chart, ledger)).assets().total(),
+              BalanceSheet::generate(TrialBalance::generate(*loaded.chart, *loaded.ledger)).assets().total());
+
+    // New backdated posting rejected; [start, end): the end belongs to the next period.
+    const std::size_t historyBefore = loaded.ledger->postedEntries().size();
+    EXPECT_THROW(postSale(*loaded.chart, *loaded.ledger, day(50), 1), ledgercore::posting::ClosedPeriodPostingException);
+    EXPECT_THROW(postSale(*loaded.chart, *loaded.ledger, day(0), 1), ledgercore::posting::ClosedPeriodPostingException);
+    EXPECT_EQ(loaded.ledger->postedEntries().size(), historyBefore);
+    postSale(*loaded.chart, *loaded.ledger, day(100), 1);
+    EXPECT_EQ(loaded.ledger->postedEntries().size(), historyBefore + 1);
+}
+
+TEST(SessionStoreTest, OpenPeriodSnapshotCanBePostedIntoClosedAndSavedAgain) {
+    Currency usd("USD");
+    const Period period(day(0), day(100));
+    const ScopedTempFile first(uniqueTempPath("open_period_first"));
+    const ScopedTempFile second(uniqueTempPath("open_period_second"));
+    {
+        ChartOfAccounts chart;
+        setUpStandardChart(chart);
+        Ledger ledger(usd);
+        ComputedAccountRegistry registry;
+        ledger.defineAccountingPeriod(period);
+        postSale(chart, ledger, day(5), 2);
+        ledgercore::persistence::save(chart, ledger, registry, first.path());  // 1. open-period snapshot
+    }
+
+    LoadedSession reopened = ledgercore::persistence::load(first.path());     // 2. load
+    EXPECT_FALSE(reopened.ledger->accountingPeriods().at(0).isClosed());
+    postSale(*reopened.chart, *reopened.ledger, day(50), 3);                   // 3. post inside
+    reopened.ledger->closeAccountingPeriod(period);                            // 4. close
+    ledgercore::persistence::save(*reopened.chart, *reopened.ledger, *reopened.computedAccounts,
+                                  second.path());                              // 5. save
+
+    LoadedSession final = ledgercore::persistence::load(second.path());        // 6. load again
+    EXPECT_EQ(final.ledger->postedEntries().size(), 2u);
+    EXPECT_TRUE(final.ledger->accountingPeriods().at(0).isClosed());
+    EXPECT_THROW(postSale(*final.chart, *final.ledger, day(60), 1), ledgercore::posting::ClosedPeriodPostingException);
+    EXPECT_NE(readRawFile(second.path()).find(" CLOSED\n"), std::string::npos);
 }
 
 TEST(SessionStoreTest, MalformedPeriodAndMalformedJournalReportTheFirstProblemInFileOrder) {

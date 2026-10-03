@@ -92,15 +92,18 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
 //
 // Accepts format v1, v2, and v3; a CLOSING record requires v2+ and is
 // replayed through domain::JournalEntry::createClosing() and
-// posting::post(), exactly like ENTRY. A PERIOD record requires v3 and is
-// rebuilt through Ledger::defineAccountingPeriod() and, for CLOSED,
-// Ledger::closeAccountingPeriod(), in file order -- after the history
-// save() writes before it, so entries inside a since-closed period replay
-// while it is still open, exactly as they were originally posted.
-// Overlapping or duplicate periods, start >= end, an unknown state, or
-// out-of-range bounds are rejected; a hand-edited file that closes a
-// period *before* an entry dated inside it fails with
-// posting::ClosedPeriodPostingException.
+// posting::post(), exactly like ENTRY. A PERIOD record requires v3.
+//
+// Snapshots have final-state semantics: they persist the journal history
+// and each period's bounds and *current* state, not when a period was
+// closed -- which the format cannot represent. So every PERIOD record is
+// validated as it is read but applied (Ledger::defineAccountingPeriod(),
+// then Ledger::closeAccountingPeriod() for CLOSED) only after the whole
+// journal has been replayed, regardless of where it appears in the file.
+// Entries dated inside a closed period are therefore loaded as legitimate
+// history, and the restored CLOSED state rejects any *new* posting dated
+// inside it. Overlapping or duplicate periods, start >= end, an unknown
+// state, or out-of-range bounds are rejected.
 //
 // Throws PersistenceVersionException if the file declares an unsupported
 // format version, PersistenceFormatException for any structural problem
