@@ -12,6 +12,29 @@
 #include "ledgercore/domain/AccountType.h"
 
 namespace ledgercore::domain {
+class ChartOfAccounts;
+} // namespace ledgercore::domain
+
+namespace ledgercore::ledger {
+class Ledger;
+} // namespace ledgercore::ledger
+
+// Forward declaration of the posting layer's ledger-aware child-account
+// factory, needed so ChartOfAccounts can grant it (and only it) access to
+// the raw child-attach operation below -- the same pattern Ledger uses to
+// admit only posting::post(). This does not make domain depend on ledger
+// or posting: ledger::Ledger is only named as an incomplete type, no
+// ledger/posting header is included, and the domain library links against
+// neither.
+namespace ledgercore::posting {
+ledgercore::domain::Account& addChildAccount(ledgercore::domain::ChartOfAccounts& chart,
+                                             const ledgercore::ledger::Ledger& ledger,
+                                             ledgercore::domain::Account& parent,
+                                             ledgercore::domain::AccountCode code,
+                                             std::string name);
+} // namespace ledgercore::posting
+
+namespace ledgercore::domain {
 
 // Aggregate root and sole factory for Account instances.
 //
@@ -44,10 +67,6 @@ public:
 
     Account& addRootAccount(AccountCode code, std::string name, AccountType type);
 
-    // AccountType is deliberately not a parameter here: the child always
-    // inherits parent.type().
-    Account& addChildAccount(Account& parent, AccountCode code, std::string name);
-
     Account* findByCode(const AccountCode& code);
     const Account* findByCode(const AccountCode& code) const;
 
@@ -63,6 +82,27 @@ public:
     std::vector<const Account*> rootAccounts() const;
 
 private:
+    // Only posting::addChildAccount() may call this. Attaching a child
+    // turns parent into a group account, which can no longer be a posting
+    // target -- so it must be refused when parent already has posting
+    // history, a fact only the Ledger knows and ChartOfAccounts
+    // deliberately does not. Keeping this private closes the bypass
+    // around that check; the public way to add a child is
+    // posting::addChildAccount(chart, ledger, parent, code, name), which
+    // checks history and then delegates here, so every chart-level rule
+    // below (foreign parent, unique code, non-empty name) is still
+    // enforced in exactly one place.
+    //
+    // AccountType is deliberately not a parameter here: the child always
+    // inherits parent.type().
+    friend Account& posting::addChildAccount(ChartOfAccounts& chart,
+                                             const ledger::Ledger& ledger,
+                                             Account& parent,
+                                             AccountCode code,
+                                             std::string name);
+
+    Account& addChildAccount(Account& parent, AccountCode code, std::string name);
+
     AccountId nextAccountId();
     void registerAccount(Account* account);
     void ensureCodeIsUnique(const AccountCode& code) const;

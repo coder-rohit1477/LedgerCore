@@ -27,15 +27,16 @@ ledger::PostingId post(const domain::JournalEntry& entry,
                         const domain::ChartOfAccounts& chart,
                         ledger::Ledger& ledger);
 
-// The ledger-aware way to add a child account once a chart is paired with
-// a Ledger. Only leaf accounts may be posting targets, and
-// ChartOfAccounts::addChildAccount() turns its parent into a group --
+// The only public way to add a child account (ChartOfAccounts's own
+// child-attach operation is private, with this function as its sole
+// friend). Only leaf accounts may be posting targets, and attaching a
+// child turns its parent into a group --
 // but ChartOfAccounts deliberately knows nothing about Ledger, so it
 // cannot tell whether that parent was already posted to. This is the one
 // place with both, mirroring post(): if parent has any posting history
 // in ledger (even history that nets to a zero balance), throws
 // PostedAccountCannotBecomeGroupException before touching chart;
-// otherwise forwards to chart.addChildAccount() unchanged, so every
+// otherwise forwards to the chart's private operation unchanged, so every
 // chart-level rule (foreign parent, duplicate code, empty name) is still
 // enforced there, with chart and ledger both left unchanged on any
 // failure.

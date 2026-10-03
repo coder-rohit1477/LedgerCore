@@ -246,10 +246,10 @@ TEST(BalanceSheetTest, RevenueAndExpenseAccountsAreExcluded) {
 TEST(BalanceSheetTest, GroupAccountsAreExcluded) {
     Currency usd("USD");
     ChartOfAccounts chart;
-    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
-    Account& equity = chart.addRootAccount(AccountCode("3000"), "Equity", AccountType::Equity);
     Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& cash = ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1110"), "Cash");
+    Account& equity = chart.addRootAccount(AccountCode("3000"), "Equity", AccountType::Equity);
 
     post(JournalEntry::create(testDate(), "Seed",
                                {

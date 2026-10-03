@@ -2,18 +2,39 @@
 
 #include <string>
 #include <type_traits>
+#include <utility>
 
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountCode.h"
 #include "ledgercore/domain/AccountType.h"
 #include "ledgercore/domain/ChartOfAccounts.h"
+#include "ledgercore/domain/Currency.h"
 #include "ledgercore/domain/DomainExceptions.h"
+#include "ledgercore/ledger/Ledger.h"
+#include "ledgercore/posting/PostingEngine.h"
 
 using ledgercore::domain::Account;
 using ledgercore::domain::AccountCode;
 using ledgercore::domain::AccountType;
 using ledgercore::domain::ChartOfAccounts;
 using ledgercore::domain::InvalidAccountException;
+using ledgercore::domain::Currency;
+using ledgercore::ledger::Ledger;
+
+namespace {
+
+// Attaching a child is only reachable through the ledger-aware
+// posting::addChildAccount() (ChartOfAccounts's own operation is private).
+// These tests exercise chart shape and chart-level rules only, so they
+// pair the chart with a fresh, never-posted Ledger -- for which the
+// posting-history check always passes and the call reduces to exactly
+// the chart's own child-attach operation and validation.
+Account& addChild(ChartOfAccounts& chart, Account& parent, AccountCode code, std::string name) {
+    const Ledger unposted(Currency("USD"));
+    return ledgercore::posting::addChildAccount(chart, unposted, parent, std::move(code), std::move(name));
+}
+
+} // namespace
 
 // Account has identity and is owned only by its ChartOfAccounts: none of
 // these may be possible through the public API, since each would let a
@@ -61,7 +82,7 @@ TEST(AccountTest, AccountIdsAreUniquePerAccount) {
 TEST(AccountTest, ChildAccountCreationSetsParentAndInheritsType) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+    Account& cash = addChild(chart, assets, AccountCode("1110"), "Cash");
 
     EXPECT_EQ(cash.parent(), &assets);
     EXPECT_EQ(cash.type(), AccountType::Asset);
@@ -71,7 +92,7 @@ TEST(AccountTest, ChildAccountCreationSetsParentAndInheritsType) {
 TEST(AccountTest, ParentExposesItsChild) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+    Account& cash = addChild(chart, assets, AccountCode("1110"), "Cash");
 
     auto children = assets.children();
     ASSERT_EQ(children.size(), 1u);
@@ -82,8 +103,8 @@ TEST(AccountTest, ParentExposesItsChild) {
 TEST(AccountTest, MultipleChildrenUnderSameParent) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    chart.addChildAccount(assets, AccountCode("1110"), "Cash");
-    chart.addChildAccount(assets, AccountCode("1120"), "Accounts Receivable");
+    addChild(chart, assets, AccountCode("1110"), "Cash");
+    addChild(chart, assets, AccountCode("1120"), "Accounts Receivable");
 
     EXPECT_EQ(assets.children().size(), 2u);
 }
@@ -91,8 +112,8 @@ TEST(AccountTest, MultipleChildrenUnderSameParent) {
 TEST(AccountTest, MultipleNestingLevelsPreserveAncestryAndType) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& current = chart.addChildAccount(assets, AccountCode("1100"), "Current Assets");
-    Account& cash = chart.addChildAccount(current, AccountCode("1110"), "Cash");
+    Account& current = addChild(chart, assets, AccountCode("1100"), "Current Assets");
+    Account& cash = addChild(chart, current, AccountCode("1110"), "Cash");
 
     ASSERT_NE(cash.parent(), nullptr);
     EXPECT_EQ(cash.parent(), &current);
@@ -104,14 +125,14 @@ TEST(AccountTest, MultipleNestingLevelsPreserveAncestryAndType) {
 TEST(AccountTest, ChartOwnedAccountsKeepStableAddressesAndLinkageAcrossGrowth) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& cash = chart.addChildAccount(assets, AccountCode("1100"), "Cash");
+    Account& cash = addChild(chart, assets, AccountCode("1100"), "Cash");
 
     // Grow both the top-level list and the child list enough to force
     // their underlying vectors to reallocate; accounts are held by
     // unique_ptr, so neither Account is ever relocated or copied.
     for (int i = 0; i < 64; ++i) {
         chart.addRootAccount(AccountCode("9" + std::to_string(i)), "Filler", AccountType::Expense);
-        chart.addChildAccount(assets, AccountCode("12" + std::to_string(i)), "Filler child");
+        addChild(chart, assets, AccountCode("12" + std::to_string(i)), "Filler child");
     }
 
     EXPECT_EQ(chart.findByCode(AccountCode("1000")), &assets);

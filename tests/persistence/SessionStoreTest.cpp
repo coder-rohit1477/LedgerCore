@@ -199,11 +199,11 @@ TEST(SessionStoreTest, RootAccountsRoundTrip) {
 TEST(SessionStoreTest, MultiLevelChartHierarchyRoundTrips) {
     Currency usd("USD");
     ChartOfAccounts chart;
-    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& current = chart.addChildAccount(assets, AccountCode("1100"), "Current Assets");
-    chart.addChildAccount(current, AccountCode("1110"), "Cash");
-    chart.addChildAccount(current, AccountCode("1120"), "Accounts Receivable");
     Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& current = ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1100"), "Current Assets");
+    ledgercore::posting::addChildAccount(chart, ledger, current, AccountCode("1110"), "Cash");
+    ledgercore::posting::addChildAccount(chart, ledger, current, AccountCode("1120"), "Accounts Receivable");
     ComputedAccountRegistry registry;
 
     const ScopedTempFile file(uniqueTempPath("multilevel"));
@@ -223,9 +223,9 @@ TEST(SessionStoreTest, MultiLevelChartHierarchyRoundTrips) {
 TEST(SessionStoreTest, LeafAndGroupStructurePreserved) {
     Currency usd("USD");
     ChartOfAccounts chart;
-    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    chart.addChildAccount(assets, AccountCode("1110"), "Cash");
     Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1110"), "Cash");
     ComputedAccountRegistry registry;
 
     const ScopedTempFile file(uniqueTempPath("leafgroup"));

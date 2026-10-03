@@ -1,13 +1,18 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <type_traits>
+#include <utility>
 
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountCode.h"
 #include "ledgercore/domain/AccountId.h"
 #include "ledgercore/domain/AccountType.h"
 #include "ledgercore/domain/ChartOfAccounts.h"
+#include "ledgercore/domain/Currency.h"
 #include "ledgercore/domain/DomainExceptions.h"
+#include "ledgercore/ledger/Ledger.h"
+#include "ledgercore/posting/PostingEngine.h"
 
 using ledgercore::domain::Account;
 using ledgercore::domain::AccountCode;
@@ -16,6 +21,68 @@ using ledgercore::domain::AccountType;
 using ledgercore::domain::ChartOfAccounts;
 using ledgercore::domain::DuplicateAccountCodeException;
 using ledgercore::domain::ForeignAccountException;
+using ledgercore::domain::Currency;
+using ledgercore::ledger::Ledger;
+
+namespace {
+
+// Attaching a child is only reachable through the ledger-aware
+// posting::addChildAccount() (ChartOfAccounts's own operation is private).
+// These tests exercise chart shape and chart-level rules only, so they
+// pair the chart with a fresh, never-posted Ledger -- for which the
+// posting-history check always passes and the call reduces to exactly
+// the chart's own child-attach operation and validation.
+Account& addChild(ChartOfAccounts& chart, Account& parent, AccountCode code, std::string name) {
+    const Ledger unposted(Currency("USD"));
+    return ledgercore::posting::addChildAccount(chart, unposted, parent, std::move(code), std::move(name));
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------
+// API boundary: no public bypass of the ledger-aware child path
+//
+// Detection idiom: access checking is part of template argument
+// substitution (C++11 and later), so these are true exactly when an
+// ordinary external caller -- like this test file -- could compile the
+// call, and false when the member is private.
+// ---------------------------------------------------------------------
+
+namespace {
+
+template <typename Chart, typename = void>
+struct CanCallChartAddChildAccount : std::false_type {};
+
+template <typename Chart>
+struct CanCallChartAddChildAccount<
+    Chart, std::void_t<decltype(std::declval<Chart&>().addChildAccount(
+               std::declval<Account&>(), std::declval<AccountCode>(), std::declval<std::string>()))>>
+    : std::true_type {};
+
+template <typename Chart, typename = void>
+struct CanCallChartAddRootAccount : std::false_type {};
+
+template <typename Chart>
+struct CanCallChartAddRootAccount<
+    Chart, std::void_t<decltype(std::declval<Chart&>().addRootAccount(
+               std::declval<AccountCode>(), std::declval<std::string>(), std::declval<AccountType>()))>>
+    : std::true_type {};
+
+} // namespace
+
+// The low-level child-attach operation is unreachable from outside:
+// calling it directly would skip the posting-history check that keeps a
+// posted leaf from becoming a group account.
+static_assert(!CanCallChartAddChildAccount<ChartOfAccounts>::value,
+              "ChartOfAccounts::addChildAccount must not be callable by external code");
+// Positive control: the same detection idiom does see a public member,
+// so the assertion above is not vacuously true.
+static_assert(CanCallChartAddRootAccount<ChartOfAccounts>::value,
+              "detection idiom must report public ChartOfAccounts members as callable");
+// The supported public path is the ledger-aware posting function.
+static_assert(std::is_invocable_r_v<Account&, decltype(&ledgercore::posting::addChildAccount), ChartOfAccounts&,
+                                    const Ledger&, Account&, AccountCode, std::string>,
+              "posting::addChildAccount must remain the public way to add a child account");
 
 TEST(ChartOfAccountsTest, DuplicateRootCodeIsRejected) {
     ChartOfAccounts chart;
@@ -30,10 +97,10 @@ TEST(ChartOfAccountsTest, DuplicateChildCodeIsRejectedEvenAcrossBranches) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
     Account& liabilities = chart.addRootAccount(AccountCode("2000"), "Liabilities", AccountType::Liability);
-    chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+    addChild(chart, assets, AccountCode("1110"), "Cash");
 
     EXPECT_THROW(
-        chart.addChildAccount(liabilities, AccountCode("1110"), "Accounts Payable"),
+        addChild(chart, liabilities, AccountCode("1110"), "Accounts Payable"),
         DuplicateAccountCodeException);
 }
 
@@ -43,7 +110,7 @@ TEST(ChartOfAccountsTest, AccountFromAnotherChartCannotBeUsedAsParent) {
     Account& assetsInA = chartA.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
 
     EXPECT_THROW(
-        chartB.addChildAccount(assetsInA, AccountCode("1110"), "Cash"),
+        addChild(chartB, assetsInA, AccountCode("1110"), "Cash"),
         ForeignAccountException);
 }
 
@@ -51,7 +118,7 @@ TEST(ChartOfAccountsTest, OwnAccountIsStillAcceptedAsParent) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
 
-    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+    Account& cash = addChild(chart, assets, AccountCode("1110"), "Cash");
     EXPECT_EQ(cash.parent(), &assets);
 }
 
@@ -61,7 +128,7 @@ TEST(ChartOfAccountsTest, ForeignParentDoesNotCorruptEitherChartsIndex) {
     Account& assetsInA = chartA.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
 
     EXPECT_THROW(
-        chartB.addChildAccount(assetsInA, AccountCode("1110"), "Cash"),
+        addChild(chartB, assetsInA, AccountCode("1110"), "Cash"),
         ForeignAccountException);
 
     EXPECT_FALSE(chartA.contains(AccountCode("1110")));
@@ -94,7 +161,7 @@ TEST(ChartOfAccountsTest, ContainsReflectsKnownCodes) {
 TEST(ChartOfAccountsTest, FindByIdReturnsMatchingAccount) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+    Account& cash = addChild(chart, assets, AccountCode("1110"), "Cash");
 
     EXPECT_EQ(chart.findById(assets.id()), &assets);
     EXPECT_EQ(chart.findById(cash.id()), &cash);
@@ -142,7 +209,7 @@ TEST(ChartOfAccountsTest, RootAccountsReturnsAllTopLevelAccountsInInsertionOrder
 TEST(ChartOfAccountsTest, RootAccountsDoesNotIncludeChildren) {
     ChartOfAccounts chart;
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    chart.addChildAccount(assets, AccountCode("1110"), "Cash");
+    addChild(chart, assets, AccountCode("1110"), "Cash");
 
     EXPECT_EQ(chart.rootAccounts().size(), 1u);
 }
@@ -154,7 +221,7 @@ TEST(ChartOfAccountsTest, FindByCodeCanLocateAnAccountToAttachFurtherChildrenTo)
     Account* assets = chart.findByCode(AccountCode("1000"));
     ASSERT_NE(assets, nullptr);
 
-    Account& cash = chart.addChildAccount(*assets, AccountCode("1110"), "Cash");
+    Account& cash = addChild(chart, *assets, AccountCode("1110"), "Cash");
     EXPECT_EQ(cash.parent(), assets);
 }
 
@@ -177,7 +244,7 @@ TEST(ChartOfAccountsTest, DeepTreeDestructionDoesNotCrash) {
         ChartOfAccounts chart;
         Account* current = &chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
         for (int i = 0; i < 100; ++i) {
-            current = &chart.addChildAccount(*current, AccountCode("1000." + std::to_string(i)), "Level");
+            current = &addChild(chart, *current, AccountCode("1000." + std::to_string(i)), "Level");
         }
     }
     SUCCEED();

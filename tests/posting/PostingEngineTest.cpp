@@ -44,6 +44,7 @@ using ledgercore::ledger::PostingId;
 using ledgercore::posting::AccountNotFoundException;
 using ledgercore::domain::DuplicateAccountCodeException;
 using ledgercore::domain::ForeignAccountException;
+using ledgercore::domain::InvalidAccountException;
 using ledgercore::posting::addChildAccount;
 using ledgercore::posting::InvalidPostingTargetException;
 using ledgercore::posting::post;
@@ -171,10 +172,10 @@ TEST(PostingEngineTest, MissingAccountThrowsAccountNotFoundException) {
 TEST(PostingEngineTest, NonLeafAccountThrowsInvalidPostingTargetException) {
     Currency usd("USD");
     ChartOfAccounts chart;
-    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    chart.addChildAccount(assets, AccountCode("1110"), "Cash");
-    Account& revenue = chart.addRootAccount(AccountCode("4000"), "Revenue", AccountType::Revenue);
     Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    addChildAccount(chart, ledger, assets, AccountCode("1110"), "Cash");
+    Account& revenue = chart.addRootAccount(AccountCode("4000"), "Revenue", AccountType::Revenue);
 
     std::vector<JournalEntryLine> lines{
         JournalEntryLine::debit(assets.id(), Money::fromMajorUnits(100, 0, usd)),
@@ -539,11 +540,11 @@ TEST(PostingEnginePropertyTest, FailedPostNeverChangesLedgerState) {
     Currency usd("USD");
     Currency eur("EUR");
     ChartOfAccounts chart;
+    Ledger ledger(usd);
     Account& cash = chart.addRootAccount(AccountCode("1000"), "Cash", AccountType::Asset);
     Account& revenue = chart.addRootAccount(AccountCode("4000"), "Revenue", AccountType::Revenue);
     Account& group = chart.addRootAccount(AccountCode("2000"), "Liabilities", AccountType::Liability);
-    chart.addChildAccount(group, AccountCode("2100"), "Accounts Payable");
-    Ledger ledger(usd);
+    addChildAccount(chart, ledger, group, AccountCode("2100"), "Accounts Payable");
 
     std::vector<JournalEntryLine> baselineLines{
         JournalEntryLine::debit(cash.id(), Money::fromMajorUnits(100, 0, usd)),
@@ -728,7 +729,7 @@ TEST(PostingEngineTest, AddChildAccountAllowsSiblingUnderGroupWhoseChildrenArePo
     ChartOfAccounts chart;
     Ledger ledger(usd);
     Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& cash = chart.addChildAccount(assets, AccountCode("1100"), "Cash");
+    Account& cash = addChildAccount(chart, ledger, assets, AccountCode("1100"), "Cash");
     Account& equity = chart.addRootAccount(AccountCode("3000"), "Capital", AccountType::Equity);
     post(JournalEntry::create(testDate(), "Owner investment",
                                {
@@ -791,4 +792,18 @@ TEST(PostingEngineTest, AddChildAccountStillEnforcesChartLevelRules) {
     EXPECT_THROW(addChildAccount(chart, ledger, receivables, AccountCode("3000"), "Dup"),
                  DuplicateAccountCodeException);
     EXPECT_TRUE(receivables.isLeaf());
+}
+
+TEST(PostingEngineTest, AddChildAccountDefersEmptyNameValidationToDomain) {
+    // The posting layer adds only the history check; Account's own
+    // non-empty-name rule still fires from the domain, unchanged, and the
+    // rejected attempt leaves the parent a leaf.
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    Account& receivables = chart.addRootAccount(AccountCode("1200"), "Receivables", AccountType::Asset);
+
+    EXPECT_THROW(addChildAccount(chart, ledger, receivables, AccountCode("1210"), ""), InvalidAccountException);
+    EXPECT_TRUE(receivables.isLeaf());
+    EXPECT_FALSE(chart.contains(AccountCode("1210")));
 }

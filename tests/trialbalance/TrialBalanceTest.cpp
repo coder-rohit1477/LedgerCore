@@ -380,10 +380,10 @@ TEST(TrialBalanceTest, AllAccountTypeSignedBalancePresentationCasesAreCorrect) {
 TEST(TrialBalanceTest, GroupAccountsAreExcluded) {
     Currency usd("USD");
     ChartOfAccounts chart;
-    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    Account& cash = chart.addChildAccount(assets, AccountCode("1110"), "Cash");
-    Account& revenue = chart.addRootAccount(AccountCode("4000"), "Revenue", AccountType::Revenue);
     Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& cash = ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1110"), "Cash");
+    Account& revenue = chart.addRootAccount(AccountCode("4000"), "Revenue", AccountType::Revenue);
 
     post(JournalEntry::create(testDate(), "Cash sale",
                                {

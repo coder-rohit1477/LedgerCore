@@ -74,9 +74,9 @@ TEST(LedgerAccountResolverTest, UnknownAccountCodeThrows) {
 TEST(LedgerAccountResolverTest, NonLeafGroupAccountIsRejected) {
     Currency usd("USD");
     ChartOfAccounts chart;
-    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    chart.addChildAccount(assets, AccountCode("1110"), "Cash");
     Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1110"), "Cash");
 
     LedgerAccountResolver resolver(chart, ledger);
     EXPECT_THROW(resolver.resolve(AccountCode("1000")), UnknownAccountReferenceException);

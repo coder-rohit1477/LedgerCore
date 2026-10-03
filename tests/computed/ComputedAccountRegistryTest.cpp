@@ -160,9 +160,9 @@ TEST(ComputedAccountRegistryTest, EvaluatesRealLeafAccountFormula) {
 TEST(ComputedAccountRegistryTest, GroupAccountReferencePropagatesRejection) {
     Currency usd("USD");
     ChartOfAccounts chart;
-    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
-    chart.addChildAccount(assets, AccountCode("1110"), "Cash");
     Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1110"), "Cash");
 
     ComputedAccountRegistry registry;
     registry.define(ComputedAccountName("Bad"), "#1000 * 2");
