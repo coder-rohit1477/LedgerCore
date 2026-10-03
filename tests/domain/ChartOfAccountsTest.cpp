@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountCode.h"
@@ -20,6 +22,7 @@ using ledgercore::domain::AccountId;
 using ledgercore::domain::AccountType;
 using ledgercore::domain::ChartOfAccounts;
 using ledgercore::domain::DuplicateAccountCodeException;
+using ledgercore::domain::ChartDepthExceededException;
 using ledgercore::domain::ForeignAccountException;
 using ledgercore::domain::Currency;
 using ledgercore::ledger::Ledger;
@@ -248,4 +251,85 @@ TEST(ChartOfAccountsTest, DeepTreeDestructionDoesNotCrash) {
         }
     }
     SUCCEED();
+}
+
+// ---------------------------------------------------------------------
+// Bounded depth and iterative traversal (Phase 20)
+// ---------------------------------------------------------------------
+
+namespace {
+
+// A single chain root -> ... -> leaf of exactly `depth` levels; returns the
+// deepest account.
+Account& buildChain(ChartOfAccounts& chart, std::size_t depth) {
+    Account* current = &chart.addRootAccount(AccountCode("L1"), "Level", AccountType::Asset);
+    for (std::size_t level = 2; level <= depth; ++level) {
+        current = &addChild(chart, *current, AccountCode("L" + std::to_string(level)), "Level");
+    }
+    return *current;
+}
+
+} // namespace
+
+TEST(ChartOfAccountsTest, ChartExactlyAtMaximumDepthIsAllowed) {
+    ChartOfAccounts chart;
+    Account& deepest = buildChain(chart, ChartOfAccounts::kMaxDepth);
+    EXPECT_TRUE(deepest.isLeaf());
+    EXPECT_EQ(chart.findByCode(AccountCode("L" + std::to_string(ChartOfAccounts::kMaxDepth))), &deepest);
+}
+
+TEST(ChartOfAccountsTest, ChildBeyondMaximumDepthIsRejectedWithoutMutation) {
+    ChartOfAccounts chart;
+    Account& deepest = buildChain(chart, ChartOfAccounts::kMaxDepth);
+    EXPECT_THROW(addChild(chart, deepest, AccountCode("TooDeep"), "Too deep"), ChartDepthExceededException);
+    EXPECT_FALSE(chart.contains(AccountCode("TooDeep")));
+    EXPECT_TRUE(deepest.isLeaf());
+    // Shallower accounts can still grow.
+    Account* level2 = chart.findByCode(AccountCode("L2"));
+    ASSERT_NE(level2, nullptr);
+    EXPECT_NO_THROW(addChild(chart, *level2, AccountCode("Sibling"), "Sibling"));
+}
+
+TEST(ChartOfAccountsTest, MaximumDepthChartsAreDestroyedWithoutRecursion) {
+    // Several maximal chains plus a wide fan-out, created and destroyed
+    // repeatedly; teardown is iterative, so this is bounded regardless.
+    for (int round = 0; round < 3; ++round) {
+        ChartOfAccounts chart;
+        buildChain(chart, ChartOfAccounts::kMaxDepth);
+        Account& wide = chart.addRootAccount(AccountCode("W"), "Wide", AccountType::Expense);
+        for (int i = 0; i < 2000; ++i) {
+            addChild(chart, wide, AccountCode("W" + std::to_string(i)), "Leaf");
+        }
+    }
+    SUCCEED();
+}
+
+TEST(ChartOfAccountsTest, PreOrderVisitIsParentFirstChildrenInInsertionOrderWithDepths) {
+    ChartOfAccounts chart;
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& current = addChild(chart, assets, AccountCode("1100"), "Current");
+    addChild(chart, current, AccountCode("1110"), "Cash");
+    addChild(chart, current, AccountCode("1120"), "Receivables");
+    addChild(chart, assets, AccountCode("1200"), "Fixed");
+    chart.addRootAccount(AccountCode("2000"), "Liabilities", AccountType::Liability);
+
+    std::vector<std::string> visited;
+    chart.forEachAccountPreOrder([&visited](const Account& account, std::size_t depth) {
+        visited.push_back(account.code().value() + "@" + std::to_string(depth));
+    });
+
+    EXPECT_EQ(visited, (std::vector<std::string>{"1000@1", "1100@2", "1110@3", "1120@3", "1200@2", "2000@1"}));
+}
+
+TEST(ChartOfAccountsTest, PreOrderVisitHandlesMaximumDepth) {
+    ChartOfAccounts chart;
+    buildChain(chart, ChartOfAccounts::kMaxDepth);
+    std::size_t count = 0;
+    std::size_t deepest = 0;
+    chart.forEachAccountPreOrder([&](const Account&, std::size_t depth) {
+        ++count;
+        deepest = std::max(deepest, depth);
+    });
+    EXPECT_EQ(count, ChartOfAccounts::kMaxDepth);
+    EXPECT_EQ(deepest, ChartOfAccounts::kMaxDepth);
 }

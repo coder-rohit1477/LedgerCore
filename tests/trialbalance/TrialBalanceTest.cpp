@@ -1544,3 +1544,63 @@ TEST(TrialBalanceTest, ExcludeHasNoEffectWithoutClosingEntries) {
         EXPECT_EQ(included.lines()[i].credit(), excluded.lines()[i].credit());
     }
 }
+
+// ---------------------------------------------------------------------
+// Phase 20: deep trees, and one implementation behind every form
+// ---------------------------------------------------------------------
+
+TEST(TrialBalanceTest, MaximumDepthChartProducesItsDeepestLeaf) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    Account* current = &chart.addRootAccount(AccountCode("D1"), "Deep", AccountType::Asset);
+    for (std::size_t level = 2; level <= ChartOfAccounts::kMaxDepth; ++level) {
+        current = &ledgercore::posting::addChildAccount(chart, ledger, *current,
+                                                        AccountCode("D" + std::to_string(level)), "Deep");
+    }
+    const AccountId revenue = chart.addRootAccount(AccountCode("R"), "Revenue", AccountType::Revenue).id();
+    post(JournalEntry::create(day(1), "Deep sale",
+                              {JournalEntryLine::debit(current->id(), Money::fromMajorUnits(9, 0, usd)),
+                               JournalEntryLine::credit(revenue, Money::fromMajorUnits(9, 0, usd))}),
+         chart, ledger);
+
+    const TrialBalance tb = TrialBalance::generate(chart, ledger);
+    ASSERT_EQ(tb.lines().size(), 2u);  // only leaves: the deepest account and R
+    EXPECT_EQ(findLine(tb, current->id()).debit(), Money::fromMajorUnits(9, 0, usd));
+    EXPECT_EQ(tb.totalDebits(), tb.totalCredits());
+}
+
+TEST(TrialBalanceTest, CachedAndReplayedFormsProduceIdenticalLines) {
+    // generate() reads the Ledger cache; generateAsOf()/Exclude replay
+    // history -- all through the same finalize(), with identical results.
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    const AccountId cash = ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1100"), "Cash").id();
+    const AccountId sales = chart.addRootAccount(AccountCode("4000"), "Sales", AccountType::Revenue).id();
+    const AccountId rent = chart.addRootAccount(AccountCode("5000"), "Rent", AccountType::Expense).id();
+    for (int i = 0; i < 50; ++i) {
+        post(JournalEntry::create(day(i), "Sale",
+                                  {JournalEntryLine::debit(cash, Money::fromMajorUnits(10 + i, 0, usd)),
+                                   JournalEntryLine::credit(sales, Money::fromMajorUnits(10 + i, 0, usd))}),
+             chart, ledger);
+        post(JournalEntry::create(day(i), "Rent",
+                                  {JournalEntryLine::debit(rent, Money::fromMajorUnits(3, 0, usd)),
+                                   JournalEntryLine::credit(cash, Money::fromMajorUnits(3, 0, usd))}),
+             chart, ledger);
+    }
+    using ledgercore::trialbalance::ClosingEntries;
+    const TrialBalance cached = TrialBalance::generate(chart, ledger);
+    for (const TrialBalance& other : {TrialBalance::generateAsOf(chart, ledger, day(1000)),
+                                      TrialBalance::generate(chart, ledger, ClosingEntries::Exclude),
+                                      TrialBalance::generateForPeriod(chart, ledger, Period(day(0), day(1000)))}) {
+        ASSERT_EQ(other.lines().size(), cached.lines().size());
+        for (std::size_t i = 0; i < cached.lines().size(); ++i) {
+            EXPECT_EQ(other.lines()[i].accountCode().value(), cached.lines()[i].accountCode().value());
+            EXPECT_EQ(other.lines()[i].debit(), cached.lines()[i].debit());
+            EXPECT_EQ(other.lines()[i].credit(), cached.lines()[i].credit());
+        }
+        EXPECT_EQ(other.totalDebits(), cached.totalDebits());
+    }
+}

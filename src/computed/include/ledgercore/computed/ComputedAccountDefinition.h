@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "ledgercore/formula/Ast.h"
@@ -22,10 +23,14 @@ public:
     const std::string& formulaSource() const noexcept { return formulaSource_; }
     const formula::AstNode& ast() const noexcept { return *ast_; }
 
+    // formula::syntaxTreeDepth(ast()), computed once at construction.
+    std::size_t astDepth() const noexcept { return astDepth_; }
+
 private:
     formula::ComputedAccountName name_;
     std::string formulaSource_;
     formula::AstNodePtr ast_;
+    std::size_t astDepth_;
 };
 
 } // namespace ledgercore::computed

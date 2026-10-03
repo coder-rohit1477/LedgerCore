@@ -1,27 +1,21 @@
 #include "ledgercore/formula/Rational.h"
 
-#include <limits>
 #include <sstream>
 
+#include "ledgercore/domain/CheckedArithmetic.h"
 #include "ledgercore/formula/FormulaExceptions.h"
 
 namespace ledgercore::formula {
 
 namespace {
 
-constexpr std::int64_t kInt64Max = std::numeric_limits<std::int64_t>::max();
-constexpr std::int64_t kInt64Min = std::numeric_limits<std::int64_t>::min();
+using domain::checked::magnitudeOf;
+using domain::checked::wouldAddOverflow;
+using domain::checked::wouldMultiplyOverflow;
+using domain::checked::wouldSubtractOverflow;
 
-// The magnitude of value as an unsigned 64-bit integer. Never negates
-// std::int64_t::min() directly (undefined behavior); instead negates
-// value + 1 (always representable, since value <= -1 here) and adds 1
-// back in unsigned arithmetic.
-std::uint64_t magnitudeOf(std::int64_t value) noexcept {
-    if (value >= 0) {
-        return static_cast<std::uint64_t>(value);
-    }
-    return static_cast<std::uint64_t>(-(value + 1)) + 1;
-}
+using domain::checked::kInt64Max;
+using domain::checked::kInt64Min;
 
 std::uint64_t gcdOf(std::uint64_t a, std::uint64_t b) noexcept {
     while (b != 0) {
@@ -30,47 +24,6 @@ std::uint64_t gcdOf(std::uint64_t a, std::uint64_t b) noexcept {
         b = remainder;
     }
     return a;
-}
-
-bool wouldAddOverflow(std::int64_t a, std::int64_t b) noexcept {
-    if (b > 0) {
-        return a > kInt64Max - b;
-    }
-    if (b < 0) {
-        return a < kInt64Min - b;
-    }
-    return false;
-}
-
-bool wouldSubtractOverflow(std::int64_t a, std::int64_t b) noexcept {
-    if (b > 0) {
-        return a < kInt64Min + b;
-    }
-    if (b < 0) {
-        return a > kInt64Max + b;
-    }
-    return false;
-}
-
-// Conservatively safe: for the one boundary case where a*b is exactly
-// std::int64_t::min() (representable, but only reachable via two
-// non-min operands), this reports "would overflow" even though the
-// exact product is technically representable. Being conservative here
-// is deliberate and matches the instruction to never invoke undefined
-// behavior -- a slightly-too-eager FormulaEvaluationException in a
-// vanishingly rare boundary case is a fully acceptable trade for never
-// risking signed overflow.
-bool wouldMultiplyOverflow(std::int64_t a, std::int64_t b) noexcept {
-    if (a == 0 || b == 0) {
-        return false;
-    }
-    if (a == kInt64Min || b == kInt64Min) {
-        const std::int64_t other = (a == kInt64Min) ? b : a;
-        return other != 1;
-    }
-    const std::int64_t absA = a < 0 ? -a : a;
-    const std::int64_t absB = b < 0 ? -b : b;
-    return absA > kInt64Max / absB;
 }
 
 } // namespace

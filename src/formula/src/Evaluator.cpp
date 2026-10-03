@@ -1,41 +1,20 @@
 #include "ledgercore/formula/Evaluator.h"
 
 #include <cstdint>
-#include <limits>
 #include <type_traits>
 #include <variant>
+
+#include "ledgercore/domain/CheckedArithmetic.h"
 
 namespace ledgercore::formula {
 
 namespace {
 
-constexpr std::int64_t kInt64Max = std::numeric_limits<std::int64_t>::max();
-constexpr std::int64_t kInt64Min = std::numeric_limits<std::int64_t>::min();
+using domain::checked::magnitudeOf;
+using domain::checked::wouldMultiplyOverflow;
 
-std::uint64_t magnitudeOf(std::int64_t value) noexcept {
-    if (value >= 0) {
-        return static_cast<std::uint64_t>(value);
-    }
-    return static_cast<std::uint64_t>(-(value + 1)) + 1;
-}
-
-// See Rational.cpp for the identical helper and the reasoning behind its
-// conservative std::int64_t::min() boundary handling; duplicated here
-// (not shared) because it is a mechanical integer-overflow primitive,
-// not a business rule -- the same category of narrow local helper Money
-// and Rational each already keep to themselves.
-bool wouldMultiplyOverflow(std::int64_t a, std::int64_t b) noexcept {
-    if (a == 0 || b == 0) {
-        return false;
-    }
-    if (a == kInt64Min || b == kInt64Min) {
-        const std::int64_t other = (a == kInt64Min) ? b : a;
-        return other != 1;
-    }
-    const std::int64_t absA = a < 0 ? -a : a;
-    const std::int64_t absB = b < 0 ? -b : b;
-    return absA > kInt64Max / absB;
-}
+using domain::checked::kInt64Max;
+using domain::checked::kInt64Min;
 
 // Rounds the exact value (p / q) to the nearest std::int64_t using
 // round-half-away-from-zero. q must be nonzero; callers check this

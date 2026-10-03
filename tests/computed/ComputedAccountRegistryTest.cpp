@@ -20,11 +20,14 @@
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/Money.h"
 #include "ledgercore/formula/ComputedAccountName.h"
+#include "ledgercore/formula/AccountResolver.h"
 #include "ledgercore/formula/FormulaExceptions.h"
+#include "ledgercore/formula/Parser.h"
 #include "ledgercore/ledger/Ledger.h"
 #include "ledgercore/posting/PostingEngine.h"
 
 using ledgercore::computed::ComputedAccountAlreadyDefinedException;
+using ledgercore::computed::ComputedAccountDepthExceededException;
 using ledgercore::computed::ComputedAccountDefinition;
 using ledgercore::computed::ComputedAccountRegistry;
 using ledgercore::computed::FormulaCycleException;
@@ -775,4 +778,124 @@ TEST(ComputedAccountRegistryPropertyTest, EvaluatingNeverMutatesLedgerAcrossMany
     }
 
     EXPECT_EQ(ledger.postedEntries().size(), historyBefore);
+}
+
+// ---------------------------------------------------------------------
+// Per-call memoization and the evaluation budget (Phase 20)
+// ---------------------------------------------------------------------
+
+namespace {
+
+// Resolves every #code to a fixed balance and counts lookups, so tests can
+// see exactly how often the leaves of a dependency graph are evaluated.
+class CountingResolver : public ledgercore::formula::AccountResolver {
+public:
+    explicit CountingResolver(Money value) : value_(std::move(value)) {}
+    Money resolve(const AccountCode& /*code*/) const override {
+        ++calls;
+        return value_;
+    }
+    mutable int calls = 0;
+
+private:
+    Money value_;
+};
+
+Money usdAmount(std::int64_t major) {
+    return Money::fromMajorUnits(major, 0, Currency("USD"));
+}
+
+} // namespace
+
+TEST(ComputedAccountRegistryTest, SharedDependencyIsEvaluatedOncePerCall) {
+    // A = @B + @C, B = @D * 2, C = @D * 3, D = #1000: D is reached twice.
+    ComputedAccountRegistry registry;
+    registry.define(ComputedAccountName("A"), "@B + @C");
+    registry.define(ComputedAccountName("B"), "@D * 2");
+    registry.define(ComputedAccountName("C"), "@D * 3");
+    registry.define(ComputedAccountName("D"), "#1000");
+    CountingResolver resolver(usdAmount(10));
+
+    EXPECT_EQ(registry.evaluate(ComputedAccountName("A"), resolver), usdAmount(50));
+    EXPECT_EQ(resolver.calls, 1);
+}
+
+TEST(ComputedAccountRegistryTest, MemoizationDoesNotOutliveTheCall) {
+    ComputedAccountRegistry registry;
+    registry.define(ComputedAccountName("A"), "@D + @D");
+    registry.define(ComputedAccountName("D"), "#1000");
+    CountingResolver first(usdAmount(1));
+    CountingResolver second(usdAmount(7));
+
+    EXPECT_EQ(registry.evaluate(ComputedAccountName("A"), first), usdAmount(2));
+    EXPECT_EQ(registry.evaluate(ComputedAccountName("A"), second), usdAmount(14));  // fresh values, not cached
+    EXPECT_EQ(first.calls, 1);
+    EXPECT_EQ(second.calls, 1);
+}
+
+TEST(ComputedAccountRegistryTest, DeepDiamondChainIsLinearNotExponential) {
+    // L_i = @L_{i-1} + @L_{i-1}: without memoization this needs 2^100 leaf
+    // evaluations; with it, one per level. (100 levels x depth 2 + the leaf
+    // stays within kMaxEvaluationDepth.)
+    ComputedAccountRegistry registry;
+    registry.define(ComputedAccountName("L0"), "#1000");
+    const int depth = 100;
+    for (int i = 1; i <= depth; ++i) {
+        registry.define(ComputedAccountName("L" + std::to_string(i)),
+                        "@L" + std::to_string(i - 1) + " + @L" + std::to_string(i - 1));
+    }
+    CountingResolver resolver(usdAmount(0));
+
+    EXPECT_TRUE(registry.evaluate(ComputedAccountName("L" + std::to_string(depth)), resolver).isZero());
+    EXPECT_EQ(resolver.calls, 1);
+}
+
+TEST(ComputedAccountRegistryTest, MemoizedDiamondStillDetectsCyclesDeterministically) {
+    // A = @B + @C; B and C both reach D; D cycles back to B.
+    ComputedAccountRegistry registry;
+    registry.define(ComputedAccountName("A"), "@B + @C");
+    registry.define(ComputedAccountName("B"), "@D");
+    registry.define(ComputedAccountName("C"), "@D");
+    registry.define(ComputedAccountName("D"), "@B");
+    CountingResolver resolver(usdAmount(1));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        try {
+            registry.evaluate(ComputedAccountName("A"), resolver);
+            FAIL() << "expected a cycle";
+        } catch (const FormulaCycleException& e) {
+            EXPECT_EQ(std::string(e.what()), "Computed account dependency cycle detected: A -> B -> D -> B");
+        }
+    }
+}
+
+TEST(ComputedAccountRegistryTest, NestedReferencesBeyondTheEvaluationBudgetFailCleanly) {
+    // A chain of single-reference definitions (depth 1 each) longer than
+    // the budget, e.g. from a hand-made snapshot.
+    ComputedAccountRegistry registry;
+    registry.define(ComputedAccountName("C0"), "#1000");
+    const std::size_t length = ComputedAccountRegistry::kMaxEvaluationDepth + 10;
+    for (std::size_t i = 1; i <= length; ++i) {
+        registry.define(ComputedAccountName("C" + std::to_string(i)), "@C" + std::to_string(i - 1));
+    }
+    CountingResolver resolver(usdAmount(1));
+
+    EXPECT_THROW(registry.evaluate(ComputedAccountName("C" + std::to_string(length)), resolver),
+                 ComputedAccountDepthExceededException);
+    // A chain that fits the budget evaluates normally.
+    EXPECT_EQ(registry.evaluate(ComputedAccountName("C" + std::to_string(ComputedAccountRegistry::kMaxEvaluationDepth - 1)),
+                                resolver),
+              usdAmount(1));
+}
+
+TEST(ComputedAccountRegistryTest, AnySingleMaximumDepthFormulaFitsTheEvaluationBudget) {
+    std::string formula = "#1000";
+    for (std::size_t i = 1; i < ledgercore::formula::kMaxFormulaDepth; ++i) {
+        formula += " + #1000";
+    }
+    ComputedAccountRegistry registry;
+    registry.define(ComputedAccountName("Wide"), formula);
+    EXPECT_EQ(registry.find(ComputedAccountName("Wide"))->astDepth(), ledgercore::formula::kMaxFormulaDepth);
+    CountingResolver resolver(usdAmount(1));
+    EXPECT_EQ(registry.evaluate(ComputedAccountName("Wide"), resolver),
+              usdAmount(static_cast<std::int64_t>(ledgercore::formula::kMaxFormulaDepth)));
 }

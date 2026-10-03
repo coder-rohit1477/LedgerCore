@@ -5,7 +5,6 @@
 #include <utility>
 
 #include "ledgercore/domain/DateFormatting.h"
-#include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/ledger/LedgerExceptions.h"
 
 namespace ledgercore::ledger {
@@ -18,14 +17,11 @@ domain::Money Ledger::balance(domain::AccountId accountId) const {
 }
 
 bool Ledger::hasPostingHistory(domain::AccountId accountId) const noexcept {
-    for (const PostedJournalEntry& posted : postedEntries_) {
-        for (const domain::JournalEntryLine& line : posted.entry().lines()) {
-            if (line.accountId() == accountId) {
-                return true;
-            }
-        }
-    }
-    return false;
+    // Invariant: commit() stores a balance for every distinct account on a
+    // posted entry's lines (even one whose lines net to zero) and nothing
+    // ever erases one -- so a balance entry exists exactly when the account
+    // appears somewhere in postedEntries_.
+    return balances_.find(accountId.value()) != balances_.end();
 }
 
 namespace {

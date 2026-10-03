@@ -1,41 +1,20 @@
 #include "ledgercore/domain/Money.h"
 
-#include <limits>
 #include <sstream>
 #include <utility>
 
+#include "ledgercore/domain/CheckedArithmetic.h"
 #include "ledgercore/domain/DomainExceptions.h"
 
 namespace ledgercore::domain {
 
 namespace {
 
-constexpr std::int64_t kInt64Max = std::numeric_limits<std::int64_t>::max();
-constexpr std::int64_t kInt64Min = std::numeric_limits<std::int64_t>::min();
+using checked::wouldAddOverflow;
+using checked::wouldSubtractOverflow;
 
-// Checks whether a + b would overflow std::int64_t, without itself
-// performing any operation that could overflow.
-bool wouldAddOverflow(std::int64_t a, std::int64_t b) noexcept {
-    if (b > 0) {
-        return a > kInt64Max - b;
-    }
-    if (b < 0) {
-        return a < kInt64Min - b;
-    }
-    return false;
-}
-
-// Checks whether a - b would overflow std::int64_t, without itself
-// performing any operation that could overflow.
-bool wouldSubtractOverflow(std::int64_t a, std::int64_t b) noexcept {
-    if (b > 0) {
-        return a < kInt64Min + b;
-    }
-    if (b < 0) {
-        return a > kInt64Max + b;
-    }
-    return false;
-}
+using checked::kInt64Max;
+using checked::kInt64Min;
 
 } // namespace
 

@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <random>
+
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -476,4 +478,31 @@ TEST(EvaluatorPropertyTest, ParenthesizationEquivalenceWhenExactlyRepresentable)
     FormulaValue left = evaluateFormula("(#1000 + #2000) + #3000", resolver);
     FormulaValue right = evaluateFormula("#1000 + (#2000 + #3000)", resolver);
     EXPECT_EQ(left.asMoney(), right.asMoney());
+}
+
+TEST(EvaluatorTest, RandomFormulaTextEitherEvaluatesOrRaisesLedgerExceptions) {
+    // Fuzz smoke for the formula lexer/parser/evaluator: seeded random
+    // strings over the formula alphabet (including extreme literals). Only
+    // LedgerCore exceptions may escape -- no crash, no UB (run under
+    // UBSan in CI).
+    Currency usd("USD");
+    MapAccountResolver resolver;
+    resolver.set("1000", Money::fromMajorUnits(10, 0, usd));
+    resolver.set("2000", Money::ofMinorUnits(std::numeric_limits<std::int64_t>::max(), usd));
+    const std::vector<std::string> pieces = {"#1000", "#2000", "#9", "@x", "1", "0", "2.5", "0.001",
+                                             "9223372036854775807", "+", "-", "*", "/", "(", ")", " ", ".", "#",
+                                             "@", "1e3"};
+    std::mt19937_64 rng(1234);
+    for (int iteration = 0; iteration < 5000; ++iteration) {
+        std::string text;
+        const std::size_t count = 1 + rng() % 12;
+        for (std::size_t i = 0; i < count; ++i) {
+            text += pieces[rng() % pieces.size()];
+        }
+        try {
+            evaluateFormula(text, resolver);
+        } catch (const ledgercore::LedgerException&) {
+        }
+    }
+    SUCCEED();
 }

@@ -1,5 +1,6 @@
 #include "ledgercore/domain/ChartOfAccounts.h"
 
+#include <string>
 #include <utility>
 
 #include "ledgercore/domain/DomainExceptions.h"
@@ -17,9 +18,37 @@ Account& ChartOfAccounts::addRootAccount(AccountCode code, std::string name, Acc
     return *raw;
 }
 
+ChartOfAccounts::~ChartOfAccounts() {
+    // Post-order teardown without recursion or allocation: descend to a
+    // leaf, destroy it by popping it off its parent's children (it has no
+    // children of its own, so its destructor does not recurse), then
+    // continue from the parent.
+    for (std::unique_ptr<Account>& root : topLevelAccounts_) {
+        Account* node = root.get();
+        while (node != nullptr) {
+            if (!node->children_.empty()) {
+                node = node->children_.back().get();
+                continue;
+            }
+            Account* parent = node->parent_;
+            if (parent != nullptr) {
+                parent->children_.pop_back();
+            } else {
+                root.reset();
+            }
+            node = parent;
+        }
+    }
+}
+
 Account& ChartOfAccounts::addChildAccount(Account& parent, AccountCode code, std::string name) {
     ensureBelongsToThisChart(parent);
     ensureCodeIsUnique(code);
+    if (parent.depth_ >= kMaxDepth) {
+        throw ChartDepthExceededException("Cannot add a child to account " + parent.code().value()
+                                          + ": the account tree may be at most " + std::to_string(kMaxDepth)
+                                          + " levels deep");
+    }
 
     const AccountId id = nextAccountId();
     Account* child = parent.addChild(id, std::move(code), std::move(name));
@@ -54,6 +83,24 @@ std::vector<const Account*> ChartOfAccounts::rootAccounts() const {
         result.push_back(account.get());
     }
     return result;
+}
+
+void ChartOfAccounts::forEachAccountPreOrder(
+    const std::function<void(const Account&, std::size_t depth)>& visit) const {
+    // Explicit stack; children pushed in reverse so they pop in insertion
+    // order, reproducing the recursive pre-order exactly.
+    std::vector<std::pair<const Account*, std::size_t>> pending;
+    for (auto root = topLevelAccounts_.rbegin(); root != topLevelAccounts_.rend(); ++root) {
+        pending.emplace_back(root->get(), 1);
+    }
+    while (!pending.empty()) {
+        const auto [account, depth] = pending.back();
+        pending.pop_back();
+        visit(*account, depth);
+        for (auto child = account->children_.rbegin(); child != account->children_.rend(); ++child) {
+            pending.emplace_back(child->get(), depth + 1);
+        }
+    }
 }
 
 AccountId ChartOfAccounts::nextAccountId() {

@@ -44,21 +44,6 @@ void printSection(std::ostream& out, const reporting::ReportSection& section) {
         << std::setw(kAmountWidth) << section.total().toString() << "\n";
 }
 
-void printAccountFlat(std::ostream& out, const domain::Account* account) {
-    out << std::left << std::setw(kCodeWidth) << account->code().value() << std::setw(kNameWidth) << account->name()
-        << std::setw(11) << accountTypeToString(account->type()) << (account->isLeaf() ? "leaf" : "group") << "\n";
-    for (const domain::Account* child : account->children()) {
-        printAccountFlat(out, child);
-    }
-}
-
-void printAccountTree(std::ostream& out, const domain::Account* account, std::size_t depth) {
-    out << std::string(depth * 2, ' ') << account->code().value() << "  " << account->name() << "\n";
-    for (const domain::Account* child : account->children()) {
-        printAccountTree(out, child, depth + 1);
-    }
-}
-
 } // namespace
 
 void printTrialBalance(std::ostream& out, const trialbalance::TrialBalance& trialBalance) {
@@ -101,13 +86,15 @@ void printIncomeStatement(std::ostream& out, const reporting::IncomeStatement& i
 }
 
 void printAccountList(std::ostream& out, const domain::ChartOfAccounts& chart, bool tree) {
-    for (const domain::Account* root : chart.rootAccounts()) {
+    chart.forEachAccountPreOrder([&out, tree](const domain::Account& account, std::size_t depth) {
         if (tree) {
-            printAccountTree(out, root, 0);
+            out << std::string((depth - 1) * 2, ' ') << account.code().value() << "  " << account.name() << "\n";
         } else {
-            printAccountFlat(out, root);
+            out << std::left << std::setw(kCodeWidth) << account.code().value() << std::setw(kNameWidth)
+                << account.name() << std::setw(11) << accountTypeToString(account.type())
+                << (account.isLeaf() ? "leaf" : "group") << "\n";
         }
-    }
+    });
 }
 
 void printAccountDetail(std::ostream& out, const domain::Account& account) {

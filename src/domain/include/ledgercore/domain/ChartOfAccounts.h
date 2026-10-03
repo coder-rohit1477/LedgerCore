@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -49,6 +51,8 @@ namespace ledgercore::domain {
 //   - A child Account always has the same AccountType as its parent --
 //     addChildAccount() takes no AccountType parameter, so a mismatch
 //     cannot be expressed, let alone rejected.
+//   - The tree is at most kMaxDepth levels deep -- addChildAccount()
+//     rejects a parent already at that depth (ChartDepthExceededException).
 //   - addChildAccount() rejects a parent Account that does not belong to
 //     this ChartOfAccounts (e.g. one obtained from a different chart),
 //     since attaching to it would register the new account's code in
@@ -60,7 +64,20 @@ namespace ledgercore::domain {
 // top-level account in accounting practice.
 class ChartOfAccounts {
 public:
+    // The deepest supported account tree: a root account is at depth 1,
+    // each child one deeper. Real charts are a handful of levels deep; the
+    // limit exists so every tree operation (traversal, saving, teardown)
+    // has bounded resource use, and so a hand-made snapshot cannot build a
+    // pathological tree. Enforced when a child is attached -- the only way
+    // a tree grows, used by both live callers and persistence::load().
+    static constexpr std::size_t kMaxDepth = 1000;
+
     ChartOfAccounts() = default;
+
+    // Tears the tree down iteratively (post-order, via parent links), so
+    // destruction never recurses through Account destructors regardless of
+    // tree shape.
+    ~ChartOfAccounts();
 
     ChartOfAccounts(const ChartOfAccounts&) = delete;
     ChartOfAccounts& operator=(const ChartOfAccounts&) = delete;
@@ -80,6 +97,13 @@ public:
     bool contains(const AccountCode& code) const;
 
     std::vector<const Account*> rootAccounts() const;
+
+    // Visits every account exactly once in pre-order -- each root in
+    // insertion order, every account before its children, children in
+    // insertion order -- passing its depth (1 for a root). Iterative, so
+    // stack use does not grow with tree depth; the one traversal every
+    // whole-tree walk (trial balance, persistence, listings) uses.
+    void forEachAccountPreOrder(const std::function<void(const Account&, std::size_t depth)>& visit) const;
 
 private:
     // Only posting::addChildAccount() may call this. Attaching a child

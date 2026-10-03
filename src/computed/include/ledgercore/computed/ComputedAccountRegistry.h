@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -23,6 +24,17 @@ namespace ledgercore::computed {
 // Not copyable: like ChartOfAccounts, this has identity.
 class ComputedAccountRegistry {
 public:
+    // The evaluation budget: while resolving nested @name references, the
+    // sum of the syntax-tree depths (formula::syntaxTreeDepth) of every
+    // definition currently being evaluated may not exceed this. It is an
+    // upper bound on the formula evaluator's recursion across the whole
+    // dependency chain, so a pathological set of definitions -- e.g. from a
+    // hand-made snapshot, whether one very deep chain or many nested
+    // formulas -- fails with ComputedAccountDepthExceededException instead
+    // of exhausting the stack. Any single formula (at most
+    // formula::kMaxFormulaDepth deep) always fits.
+    static constexpr std::size_t kMaxEvaluationDepth = 256;
+
     ComputedAccountRegistry() = default;
 
     ComputedAccountRegistry(const ComputedAccountRegistry&) = delete;
@@ -42,7 +54,12 @@ public:
 
     // Evaluates name's formula against realResolver for every #code
     // reference, recursively resolving @name references against this
-    // registry's own definitions, with cycle detection. Throws
+    // registry's own definitions, with cycle detection. Each computed
+    // account is evaluated at most once per call (shared dependencies are
+    // memoized for the duration of the call only), so diamond-shaped
+    // dependency graphs cost linear, not exponential, time. Throws
+    // ComputedAccountDepthExceededException if nested references exceed
+    // kMaxEvaluationDepth, and
     // UnknownComputedAccountException if name (or any @name it
     // transitively depends on) is not defined, FormulaCycleException on
     // a dependency cycle, FormulaEvaluationException if the formula's

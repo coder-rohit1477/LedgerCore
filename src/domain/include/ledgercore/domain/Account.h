@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -65,6 +66,9 @@ private:
     AccountType type_;
     Account* parent_;
     std::vector<std::unique_ptr<Account>> children_;
+    // 1 for a root account, parent's depth + 1 otherwise; fixed at
+    // construction. Lets ChartOfAccounts enforce its maximum depth in O(1).
+    std::size_t depth_;
 };
 
 } // namespace ledgercore::domain

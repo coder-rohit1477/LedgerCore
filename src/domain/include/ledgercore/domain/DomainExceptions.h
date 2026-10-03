@@ -40,6 +40,13 @@ public:
     explicit ForeignAccountException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown by ChartOfAccounts when attaching a child would make the account
+// tree deeper than ChartOfAccounts::kMaxDepth levels.
+class ChartDepthExceededException : public ledgercore::LedgerException {
+public:
+    explicit ChartDepthExceededException(const std::string& message) : LedgerException(message) {}
+};
+
 // Thrown when a Currency code is not exactly three uppercase ASCII
 // letters (the ISO 4217 alpha-3 shape).
 class InvalidCurrencyException : public ledgercore::LedgerException {

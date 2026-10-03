@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <string>
+
 #include "ledgercore/formula/Ast.h"
 #include "ledgercore/formula/FormulaExceptions.h"
 #include "ledgercore/formula/Parser.h"
@@ -191,4 +193,60 @@ TEST(ParserTest, UnspacedMinusBetweenAccountReferencesIsASyntaxError) {
     EXPECT_THROW(parse("#1000-#2000"), FormulaSyntaxException);
     EXPECT_NO_THROW(parse("#1000 - #2000"));
     EXPECT_NO_THROW(parse("#1000 -#2000"));
+}
+
+// ---------------------------------------------------------------------
+// Bounded nesting (Phase 20): adversarial depth fails cleanly
+// ---------------------------------------------------------------------
+
+namespace {
+
+using ledgercore::formula::kMaxFormulaDepth;
+using ledgercore::formula::syntaxTreeDepth;
+
+std::string sumChain(std::size_t terms) {  // "1 + 1 + ..." : depth == terms
+    std::string text = "1";
+    for (std::size_t i = 1; i < terms; ++i) {
+        text += " + 1";
+    }
+    return text;
+}
+
+} // namespace
+
+TEST(ParserTest, SyntaxTreeDepthCountsOperatorLevels) {
+    EXPECT_EQ(syntaxTreeDepth(*parse("1")), 1u);
+    EXPECT_EQ(syntaxTreeDepth(*parse("-1")), 2u);
+    EXPECT_EQ(syntaxTreeDepth(*parse("1 + 2 * 3")), 3u);
+    EXPECT_EQ(syntaxTreeDepth(*parse("((1))")), 1u);  // grouping adds no tree level
+    EXPECT_EQ(syntaxTreeDepth(*parse(sumChain(10))), 10u);
+}
+
+TEST(ParserTest, FormulaExactlyAtMaximumDepthParses) {
+    const AstNodePtr ast = parse(sumChain(kMaxFormulaDepth));
+    EXPECT_EQ(syntaxTreeDepth(*ast), kMaxFormulaDepth);
+}
+
+TEST(ParserTest, OperatorChainBeyondMaximumDepthIsRejected) {
+    EXPECT_THROW(parse(sumChain(kMaxFormulaDepth + 1)), FormulaSyntaxException);
+}
+
+TEST(ParserTest, ParenthesisNestingBeyondMaximumIsRejected) {
+    const std::string atLimit = std::string(kMaxFormulaDepth, '(') + "1" + std::string(kMaxFormulaDepth, ')');
+    EXPECT_NO_THROW(parse(atLimit));
+    const std::string beyond = "(" + atLimit + ")";
+    EXPECT_THROW(parse(beyond), FormulaSyntaxException);
+}
+
+TEST(ParserTest, AdversariallyDeepFormulasFailCleanlyInsteadOfOverflowingTheStack) {
+    const std::size_t huge = 100000;
+    EXPECT_THROW(parse(std::string(huge, '(') + "1" + std::string(huge, ')')), FormulaSyntaxException);
+    EXPECT_THROW(parse(std::string(huge, '(')), FormulaSyntaxException);  // unbalanced, too
+    EXPECT_THROW(parse(std::string(huge, '-') + "1"), FormulaSyntaxException);
+    EXPECT_THROW(parse(sumChain(huge)), FormulaSyntaxException);
+    try {
+        parse(std::string(huge, '(') + "1" + std::string(huge, ')'));
+    } catch (const FormulaSyntaxException& e) {
+        EXPECT_EQ(e.offset(), kMaxFormulaDepth);  // deterministic: the first '(' beyond the limit
+    }
 }

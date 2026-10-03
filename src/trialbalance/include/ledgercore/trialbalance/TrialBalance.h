@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -138,14 +139,13 @@ private:
     TrialBalance(domain::Currency currency, std::vector<TrialBalanceLine> lines, domain::Money totalDebits,
                  domain::Money totalCredits);
 
-    // Shared tail for generateAsOf()/generateForPeriod(): given each
-    // account's already-accumulated signed balance (accountId.value() ->
-    // Money; an absent key means zero, i.e. no activity), builds the
-    // sorted TrialBalanceLine list and totals exactly like generate()
-    // does, and applies the same balance check. generate() itself does
-    // not use this helper -- its own implementation is left untouched.
+    // The single implementation behind every generate*() form: given each
+    // leaf account's signed balance (balanceOf -- the Ledger's cache for
+    // generate(), a replayed map otherwise), builds the TrialBalanceLine
+    // list sorted by AccountCode, totals both columns, and applies the
+    // balance check.
     static TrialBalance finalize(const domain::ChartOfAccounts& chart,
-                                  const std::unordered_map<std::uint64_t, domain::Money>& balances,
+                                  const std::function<domain::Money(domain::AccountId)>& balanceOf,
                                   const domain::Currency& currency);
 
     domain::Currency currency_;

@@ -21,6 +21,7 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Leaf vs. group account distinction — only leaf accounts can be posted to
 - AccountType inheritance — a child account always inherits its parent's type
 - Chart-wide unique AccountCode enforcement
+- Bounded tree depth (`ChartOfAccounts::kMaxDepth`, 1000 levels); every whole-tree operation is iterative, so stack use never grows with depth
 - System-assigned, stable AccountId identity, distinct from AccountCode
 - An account with posting history can never become a group account: child accounts are added only through the ledger-aware `posting::addChildAccount` (the raw `ChartOfAccounts` operation is private)
 
@@ -59,11 +60,13 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Explicit dimensional rules for mixing `Money` and scalar values
 - Overflow checking throughout
 - Deterministic evaluation given the same AST and resolver
+- Bounded nesting (`formula::kMaxFormulaDepth`, 128 levels), so adversarially deep input fails with a syntax error instead of exhausting the stack
 - Documented reference grammar: `-` and `.` are valid account-code characters, so `#1000-1` names account `1000-1`; subtraction after a reference needs whitespace (`#1000 - 1`) — see [§7](#7-formula--computed-account-example)
 
 ### Computed Accounts
 - `@name`-style computed-account references, resolved against a registry
-- Recursive dependency resolution, including diamond dependencies
+- Recursive dependency resolution, including diamond dependencies — each computed account is evaluated at most once per evaluation (per-call memoization), so diamonds cost linear time
+- Bounded total evaluation depth across nested references (`ComputedAccountRegistry::kMaxEvaluationDepth`)
 - Cycle detection with a reported dependency path
 - Deterministic evaluation
 - Read-only with respect to the Ledger — evaluating a computed account never posts or mutates it
@@ -316,23 +319,37 @@ Computed Accounts → names formulas, resolves @name references against each oth
 
 The Formula Engine has no knowledge of `ComputedAccountRegistry`, `ChartOfAccounts`, or `Ledger` — it only knows `AccountResolver` and `ComputedAccountResolver`, two narrow abstractions supplied by the caller.
 
+### Resource Limits and Complexity
+
+The engine bounds every recursion that input can drive, so a hand-made snapshot or formula can fail, but never crash the process:
+
+| Limit | Value | Bounds | On violation |
+|---|---|---|---|
+| `ChartOfAccounts::kMaxDepth` | 1000 levels | account-tree depth (checked when a child is attached, live or on load) | `ChartDepthExceededException` |
+| `formula::kMaxFormulaDepth` | 128 levels | a formula's syntax-tree depth and parenthesis/unary nesting | `FormulaSyntaxException` |
+| `ComputedAccountRegistry::kMaxEvaluationDepth` | 256 levels | the summed formula depth along a chain of nested `@name` references | `ComputedAccountDepthExceededException` |
+
+Tree traversals (trial balance, saving, account listings) and chart teardown are iterative. The formula limits were sized by measuring worst-case stack use, including under AddressSanitizer.
+
+Costs worth knowing: posting, `hasPostingHistory`, and cumulative trial balances are O(1)/O(accounts) per call; as-of/period trial balances, journal queries, and closing are linear scans of history. Validating a closing entry replays history (O(history)), so a ledger with many closing entries pays O(closings × history) when posting them and again on load — about 1.2 s / 0.5 s for 1,000 closings over 100,000 entries — which is negligible for periodic closes.
+
 ## 8. Testing
 
-**690 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
+**723 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
 
 | Module | Tests |
 |---|---|
-| domain (Account, ChartOfAccounts, Money, JournalEntry, NormalBalance, Period, date formatting) | 131 |
+| domain (Account, ChartOfAccounts, Money, JournalEntry, NormalBalance, Period, date formatting, checked arithmetic) | 138 |
 | ledger | 18 |
-| posting | 54 |
-| formula (Lexer, Rational, Parser, Evaluator) | 112 |
-| computed | 38 |
-| trialbalance | 52 |
+| posting | 58 |
+| formula (Lexer, Rational, Parser, Evaluator) | 118 |
+| computed | 44 |
+| trialbalance | 54 |
 | reporting | 30 |
 | closing | 40 |
 | journalquery | 22 |
-| persistence | 77 |
-| cli (input parsing, command parsing, session, process-level end-to-end) | 115 |
+| persistence | 82 |
+| cli (input parsing, command parsing, session, process-level end-to-end) | 118 |
 | smoke | 1 |
 
 The suite mixes unit, integration, and property-style tests, targeted at the invariants the domain actually cares about rather than at raw line coverage:
@@ -345,6 +362,7 @@ The suite mixes unit, integration, and property-style tests, targeted at the inv
 - period boundary behavior (`[start, end)` edges, adjacent-period tiling, backdated entries)
 - reporting equations (Balance Sheet / Income Statement identities hold after randomized posting sequences)
 - accounting periods (overlap rules, one-way lifecycle, `[start, end)` lock boundaries, atomic rejection of backdated postings, report invariance under locking, v3 final-state persistence and hand-edited period records)
+- adversarial input: deep charts, deep formulas and dependency chains at and beyond every limit, and seeded fuzz-smoke tests that corrupt valid snapshots and feed random text to the formula and CLI parsers (no crash, only LedgerCore errors — under ASan/UBSan in CI)
 - journal history queries (each filter and their combination, `[start, end)` boundaries, posting-order determinism, same-date ordering, exact Money/currency, read-only behaviour, identical results across save/load for v1/v2/v3)
 - closing entries (sign correctness for every account type, net income/loss, contra balances, invalid targets, atomic failure, repeated and multi-year closing, report consistency before and after closing)
 - persistence round trips (save → load → save is byte-identical), corruption and version handling, failed-load isolation, date-range boundaries
@@ -499,7 +517,7 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
-- 690 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
+- 723 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 
@@ -510,7 +528,7 @@ This is not a claim of production readiness — see [Overview](#1-overview).
 Reasonable, currently-unimplemented future work:
 
 - Reopening a closed accounting period (deliberately unsupported today: `Open → Closed` is one-way)
-- Recursion-depth hardening in the formula parser and computed-account dependency resolution, before either would ever accept untrusted input
+- Coverage-guided fuzzing (libFuzzer) of the snapshot, formula, and CLI parsers; today they are covered by seeded fuzz-smoke tests
 - Richer fiscal-period abstractions (e.g. named fiscal calendars) built on top of the existing `Period` primitive
 - Additional reporting capabilities (e.g. comparative periods, cash flow statement)
 - Performance work on full-history replay in `generateAsOf`/`generateForPeriod`, if a future use case demonstrates it's actually needed

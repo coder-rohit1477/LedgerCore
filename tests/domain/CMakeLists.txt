@@ -6,6 +6,7 @@ add_executable(ledgercore_domain_tests
     NormalBalanceTest.cpp
     PeriodTest.cpp
     DateFormattingTest.cpp
+    CheckedArithmeticTest.cpp
 )
 
 # ledgercore_posting (not ledgercore_domain directly): attaching a child

@@ -30,6 +30,13 @@ private:
     std::vector<formula::ComputedAccountName> path_;
 };
 
+// Evaluation would nest @name references deeper than
+// ComputedAccountRegistry::kMaxEvaluationDepth allows.
+class ComputedAccountDepthExceededException : public ledgercore::LedgerException {
+public:
+    explicit ComputedAccountDepthExceededException(const std::string& message) : LedgerException(message) {}
+};
+
 // ComputedAccountRegistry::define() was called with a name that already
 // has a definition.
 class ComputedAccountAlreadyDefinedException : public ledgercore::LedgerException {

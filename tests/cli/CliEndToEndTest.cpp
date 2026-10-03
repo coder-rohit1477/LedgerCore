@@ -721,3 +721,41 @@ TEST(CliEndToEndTest, JournalRejectsInvalidFiltersWithUsageExitCode) {
     // An inverted range is the existing domain Period rule (accounting exit code).
     EXPECT_EQ(runScript(journalScript("journal --from 2027-01-01 --to 2026-01-01")).exitCode, 2);
 }
+
+// ---------------------------------------------------------------------
+// Phase 20: adversarial snapshots fail cleanly, never crash the CLI
+// ---------------------------------------------------------------------
+
+TEST(CliEndToEndTest, LoadingA100000LevelSnapshotFailsCleanlyAndTheSessionSurvives) {
+    const std::string snapshotPath = uniqueTempPath("deep_snapshot");
+    {
+        std::ofstream out(snapshotPath);
+        out << "LEDGERCORE-SNAPSHOT v1\nCURRENCY USD\nACCOUNT ROOT D1 Asset \"Deep\"\n";
+        for (int level = 2; level <= 100000; ++level) {
+            out << "ACCOUNT CHILD D" << level - 1 << " D" << level << " \"Deep\"\n";
+        }
+    }
+    const RunResult script = runScript("load " + snapshotPath + "\n");
+    EXPECT_EQ(script.exitCode, 2);
+    EXPECT_NE(script.output.find("the account tree may be at most 1000 levels deep"), std::string::npos)
+        << script.output;
+
+    const RunResult repl = runRepl("account create-root --code 1000 --name Cash --type asset\n"
+                                   "load " + snapshotPath + "\n"
+                                   "trial-balance\n"
+                                   "save " + snapshotPath + ".after\n"
+                                   "exit\n");
+    std::remove(snapshotPath.c_str());
+    std::remove((snapshotPath + ".after").c_str());
+    EXPECT_EQ(repl.exitCode, 0);
+    EXPECT_NE(repl.output.find("levels deep"), std::string::npos);
+    EXPECT_NE(repl.output.find("TOTAL"), std::string::npos);  // the original session still works
+    EXPECT_NE(repl.output.find("Saved LedgerCore session"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, AdversariallyDeepFormulaIsRejectedWithAccountingExitCode) {
+    const RunResult result = runScript("formula eval " + std::string(100000, '(') + "1" + std::string(100000, ')')
+                                       + "\n");
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_NE(result.output.find("nested more than 128 levels deep"), std::string::npos);
+}

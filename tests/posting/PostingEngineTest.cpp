@@ -1158,3 +1158,62 @@ TEST(PostingEngineTest, BackdatedClosingEntryIntoClosedPeriodIsRejected) {
     EXPECT_EQ(y.historySize(), 2u);
     EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(100, 0, y.usd));
 }
+
+// ---------------------------------------------------------------------
+// Phase 20: O(1) posting-history check, deterministic closing errors
+// ---------------------------------------------------------------------
+
+TEST(LedgerPostingHistoryTest, HistoryIsFalseUntilPostedThenTrueForever) {
+    OpenYear y;
+    EXPECT_TRUE(y.ledger.hasPostingHistory(y.cash));
+    EXPECT_TRUE(y.ledger.hasPostingHistory(y.capital));
+    EXPECT_FALSE(y.ledger.hasPostingHistory(y.rent));
+    EXPECT_FALSE(y.ledger.hasPostingHistory(AccountId(9999)));
+    y.postStandard(day(20), y.rent, y.cash, 30);
+    EXPECT_TRUE(y.ledger.hasPostingHistory(y.rent));
+    y.postStandard(day(21), y.cash, y.rent, 30);  // rent back to a zero balance
+    EXPECT_TRUE(y.ledger.balance(y.rent).isZero());
+    EXPECT_TRUE(y.ledger.hasPostingHistory(y.rent));
+}
+
+TEST(LedgerPostingHistoryTest, AccountWhoseLinesNetToZeroWithinOneEntryHasHistory) {
+    OpenYear y;
+    post(JournalEntry::create(day(30), "Wash",
+                              {y.dr(y.rent, 5), y.cr(y.rent, 5), y.dr(y.cash, 1), y.cr(y.otherEquity, 1)}),
+         y.chart, y.ledger);
+    EXPECT_TRUE(y.ledger.balance(y.rent).isZero());
+    EXPECT_TRUE(y.ledger.hasPostingHistory(y.rent));
+    EXPECT_THROW(addChildAccount(y.chart, y.ledger, *y.chart.findByCode(AccountCode("5000")),
+                                 AccountCode("5010"), "Sub-rent"),
+                 PostedAccountCannotBecomeGroupException);
+}
+
+TEST(LedgerPostingHistoryTest, HistoryStaysCorrectAcrossManyPostings) {
+    OpenYear y;
+    for (int i = 0; i < 2000; ++i) {
+        y.postStandard(day(20) + std::chrono::minutes(i), y.cash, y.sales, 1);
+    }
+    EXPECT_TRUE(y.ledger.hasPostingHistory(y.sales));
+    EXPECT_FALSE(y.ledger.hasPostingHistory(y.rent));
+    EXPECT_FALSE(y.ledger.hasPostingHistory(y.retained));
+}
+
+TEST(PostingEngineTest, IncompleteClosingErrorNamesTheLowestCodeAccountRegardlessOfLineOrder) {
+    // Sales (4000) and Rent (5000) both left non-zero; whichever order the
+    // lines are written in, the message deterministically names 4000.
+    for (int order = 0; order < 2; ++order) {
+        OpenYear y;
+        y.postStandard(day(20), y.rent, y.cash, 30);
+        std::vector<JournalEntryLine> lines = order == 0
+            ? std::vector<JournalEntryLine>{y.dr(y.sales, 40), y.cr(y.rent, 10), y.cr(y.retained, 30)}
+            : std::vector<JournalEntryLine>{y.cr(y.retained, 30), y.cr(y.rent, 10), y.dr(y.sales, 40)};
+        try {
+            y.postClosing(std::move(lines));
+            FAIL() << "expected an incomplete closing entry to be rejected";
+        } catch (const InvalidClosingEntryException& e) {
+            EXPECT_EQ(std::string(e.what()),
+                      "A closing entry must bring every Revenue and Expense account to zero as of its cutoff; "
+                      "account 4000 would be left at 60.00 USD");
+        }
+    }
+}

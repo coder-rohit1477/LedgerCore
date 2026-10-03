@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <random>
+#include <string>
+
 namespace {
 
 using ledgercore::cli::CliUsageError;
@@ -285,4 +288,32 @@ TEST(CommandParserTest, JournalRejectsContradictoryMissingOrUnknownArguments) {
     EXPECT_THROW(parseLine("journal --as-of 2027-01-01"), CliUsageError);
     EXPECT_THROW(parseLine("journal --kind closing"), CliUsageError);
     EXPECT_THROW(parseLine("journal 1000"), CliUsageError);
+}
+
+TEST(CommandParserTest, RandomCommandLinesEitherParseOrRaiseUsageErrors) {
+    // Fuzz smoke for the CLI grammar: seeded random token soup built from
+    // real verbs, flags, and junk. parseLine() may only succeed or throw
+    // CliUsageError.
+    const std::vector<std::string> pieces = {
+        "account", "create-root", "create-child", "list", "show", "post", "trial-balance", "balance-sheet",
+        "income-statement", "formula", "eval", "computed", "define", "close", "period", "create", "journal",
+        "save", "load", "exit", "--code", "--name", "--type", "--parent", "--date", "--description", "--debit",
+        "--credit", "--as-of", "--from", "--to", "--formula", "--retained-earnings", "--start", "--end", "--account",
+        "--standard", "--closing", "--tree", "--", "-", "\"", "\"quoted value\"", "1000:5.00", "2026-01-01", "#1000",
+        "x", ":", "", "--bogus"};
+    std::mt19937_64 rng(77);
+    for (int iteration = 0; iteration < 5000; ++iteration) {
+        std::string line;
+        const std::size_t count = rng() % 9;
+        for (std::size_t i = 0; i < count; ++i) {
+            line += pieces[rng() % pieces.size()] + (rng() % 7 == 0 ? "" : " ");
+        }
+        try {
+            parseLine(line);
+        } catch (const CliUsageError&) {
+        }
+    }
+    const std::string huge(200000, 'a');
+    EXPECT_THROW(parseLine(huge), CliUsageError);
+    EXPECT_NO_THROW(parseLine("journal " + std::string(50000, ' ')));
 }

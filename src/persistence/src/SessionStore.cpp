@@ -263,20 +263,18 @@ std::chrono::system_clock::time_point timePointFromNanos(std::int64_t nanos) {
 // Writing
 // ---------------------------------------------------------------------
 
-void writeAccountsPreOrder(std::ostream& out, const domain::Account& account, const domain::Account* parent) {
+void writeAccount(std::ostream& out, const domain::Account& account) {
     if (!isSafeUnquotedField(account.code().value())) {
         throw PersistenceException("AccountCode '" + account.code().value()
                                     + "' cannot be represented in this file format (contains whitespace or '\"')");
     }
+    const domain::Account* parent = account.parent();
     if (parent == nullptr) {
         out << "ACCOUNT ROOT " << account.code().value() << ' ' << accountTypeToToken(account.type()) << ' '
             << escapeQuoted(account.name()) << '\n';
     } else {
         out << "ACCOUNT CHILD " << parent->code().value() << ' ' << account.code().value() << ' '
             << escapeQuoted(account.name()) << '\n';
-    }
-    for (const domain::Account* child : account.children()) {
-        writeAccountsPreOrder(out, *child, &account);
     }
 }
 
@@ -292,9 +290,9 @@ void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, cons
     out << kHeaderPrefix << version << '\n';
     out << "CURRENCY " << ledger.currency().code() << '\n';
 
-    for (const domain::Account* root : chart.rootAccounts()) {
-        writeAccountsPreOrder(out, *root, nullptr);
-    }
+    // Parent-before-child pre-order, iterative (bounded stack for any depth).
+    chart.forEachAccountPreOrder(
+        [&out](const domain::Account& account, std::size_t /*depth*/) { writeAccount(out, account); });
 
     for (const ledger::PostedJournalEntry& posted : ledger.postedEntries()) {
         const domain::JournalEntry& entry = posted.entry();
@@ -446,6 +444,137 @@ std::vector<domain::JournalEntryLine> parseEntryLines(const std::vector<std::str
     return result;
 }
 
+// ---------------------------------------------------------------------
+// Loading, one helper per record kind (see load() for the overall order)
+// ---------------------------------------------------------------------
+
+void skipBlankLines(const std::vector<std::string>& lines, std::size_t& index) {
+    while (index < lines.size() && isBlank(lines[index])) {
+        ++index;
+    }
+}
+
+// The "LEDGERCORE-SNAPSHOT v<N>" header: returns N, a supported version.
+std::int64_t readHeaderVersion(const std::vector<std::string>& lines, std::size_t& index) {
+    skipBlankLines(lines, index);
+    if (index >= lines.size()) {
+        throw PersistenceFormatException("empty file: missing header");
+    }
+    const std::string& headerLine = lines[index];
+    if (headerLine.rfind(kHeaderPrefix, 0) != 0) {
+        throw PersistenceFormatException("missing or malformed header at line " + std::to_string(index + 1));
+    }
+    const std::string versionText = headerLine.substr(std::char_traits<char>::length(kHeaderPrefix));
+    const std::int64_t version = parseInt64Field(versionText, "header version", index + 1);
+    if (version != kFormatVersionV1 && version != kFormatVersionWithClosing && version != kFormatVersionWithPeriods) {
+        throw PersistenceVersionException("unsupported snapshot version: " + versionText);
+    }
+    ++index;
+    return version;
+}
+
+domain::Currency readCurrency(const std::vector<std::string>& lines, std::size_t& index) {
+    skipBlankLines(lines, index);
+    if (index >= lines.size()) {
+        throw PersistenceFormatException("truncated file: missing CURRENCY record");
+    }
+    const std::vector<std::string> currencyTokens = tokenizeRecordLine(lines[index], index + 1);
+    if (currencyTokens.size() != 2 || currencyTokens[0] != "CURRENCY") {
+        throw PersistenceFormatException("expected CURRENCY record at line " + std::to_string(index + 1));
+    }
+    ++index;
+    return domain::Currency(currencyTokens[1]);
+}
+
+// An ENTRY or CLOSING record plus its DEBIT/CREDIT lines (consumed from
+// lines at index), rebuilt through validated domain construction and
+// replayed through posting::post(), which also re-checks a closing
+// entry's shape.
+void replayJournalRecord(const std::vector<std::string>& tokens, std::size_t lineNumber, std::int64_t version,
+                         const std::vector<std::string>& lines, std::size_t& index, const domain::ChartOfAccounts& chart,
+                         ledger::Ledger& ledger) {
+    const std::string& recordType = tokens[0];
+    const bool isClosing = recordType == "CLOSING";
+    if (isClosing && version < kFormatVersionWithClosing) {
+        throw PersistenceFormatException("CLOSING record at line " + std::to_string(lineNumber)
+                                          + " requires snapshot format v2");
+    }
+    if (tokens.size() != 3) {
+        throw PersistenceFormatException("malformed " + recordType + " record at line " + std::to_string(lineNumber));
+    }
+    const std::int64_t nanos = parseInt64Field(tokens[1], recordType + " date", lineNumber);
+    if (nanos < kMinSupportedNanos || nanos >= kEndOfSupportedNanos) {
+        throw PersistenceFormatException(recordType + " date " + tokens[1] + " at line " + std::to_string(lineNumber)
+                                          + " is outside the supported range "
+                                            "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)");
+    }
+    const std::chrono::system_clock::time_point date = timePointFromNanos(nanos);
+    const std::string& description = tokens[2];
+
+    std::vector<domain::JournalEntryLine> entryLines = parseEntryLines(lines, index, chart, ledger.currency());
+    const domain::JournalEntry entry = isClosing
+                                           ? domain::JournalEntry::createClosing(date, description, std::move(entryLines))
+                                           : domain::JournalEntry::create(date, description, std::move(entryLines));
+    posting::post(entry, chart, ledger);
+}
+
+// A PERIOD record, validated now but applied only after the whole journal
+// has been replayed (see applyPeriods()).
+struct PendingPeriod {
+    domain::Period period;
+    bool closed;
+};
+
+PendingPeriod parsePeriodRecord(const std::vector<std::string>& tokens, std::size_t lineNumber, std::int64_t version) {
+    if (version < kFormatVersionWithPeriods) {
+        throw PersistenceFormatException("PERIOD record at line " + std::to_string(lineNumber)
+                                          + " requires snapshot format v3");
+    }
+    if (tokens.size() != 4) {
+        throw PersistenceFormatException("malformed PERIOD record at line " + std::to_string(lineNumber));
+    }
+    const std::int64_t startNanos = parseInt64Field(tokens[1], "PERIOD start", lineNumber);
+    const std::int64_t endNanos = parseInt64Field(tokens[2], "PERIOD end", lineNumber);
+    if (startNanos < kMinSupportedNanos || startNanos >= kEndOfSupportedNanos || endNanos <= kMinSupportedNanos
+        || endNanos > kEndOfSupportedNanos) {
+        throw PersistenceFormatException("PERIOD bounds at line " + std::to_string(lineNumber)
+                                          + " are outside the supported date range");
+    }
+    const std::string& state = tokens[3];
+    if (state != "OPEN" && state != "CLOSED") {
+        throw PersistenceFormatException("unknown PERIOD state '" + state + "' at line " + std::to_string(lineNumber));
+    }
+    // start >= end fails here (domain::InvalidPeriodException); overlaps
+    // and duplicates fail when the periods are applied.
+    return PendingPeriod{domain::Period(timePointFromNanos(startNanos), timePointFromNanos(endNanos)),
+                         state == "CLOSED"};
+}
+
+void defineComputedRecord(const std::vector<std::string>& tokens, std::size_t lineNumber,
+                          computed::ComputedAccountRegistry& registry) {
+    if (tokens.size() != 3) {
+        throw PersistenceFormatException("malformed COMPUTED record at line " + std::to_string(lineNumber));
+    }
+    registry.define(formula::ComputedAccountName(tokens[1]), tokens[2]);
+}
+
+// Restores the final period state through the Ledger's own API, after the
+// whole journal has been replayed with no period closed: overlapping or
+// duplicate periods (ledger::AccountingPeriodOverlapException) fail
+// exactly as they would live, and entries dated inside a now-closed
+// period are legitimate history -- the format records only that the
+// period is closed, which governs postings made after the load.
+void applyPeriods(const std::vector<PendingPeriod>& pendingPeriods, ledger::Ledger& ledger) {
+    for (const PendingPeriod& pending : pendingPeriods) {
+        ledger.defineAccountingPeriod(pending.period);
+    }
+    for (const PendingPeriod& pending : pendingPeriods) {
+        if (pending.closed) {
+            ledger.closeAccountingPeriod(pending.period);
+        }
+    }
+}
+
 } // namespace
 
 void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
@@ -495,152 +624,51 @@ LoadedSession load(const std::filesystem::path& path) {
     in.close();
 
     std::size_t index = 0;
-    const auto skipBlank = [&]() {
-        while (index < lines.size() && isBlank(lines[index])) {
-            ++index;
-        }
-    };
+    const std::int64_t version = readHeaderVersion(lines, index);
+    const domain::Currency currency = readCurrency(lines, index);
 
-    skipBlank();
-    if (index >= lines.size()) {
-        throw PersistenceFormatException("empty file: missing header");
-    }
-    const std::string& headerLine = lines[index];
-    if (headerLine.rfind(kHeaderPrefix, 0) != 0) {
-        throw PersistenceFormatException("missing or malformed header at line " + std::to_string(index + 1));
-    }
-    const std::string versionText = headerLine.substr(std::char_traits<char>::length(kHeaderPrefix));
-    const std::int64_t version = parseInt64Field(versionText, "header version", index + 1);
-    if (version != kFormatVersionV1 && version != kFormatVersionWithClosing && version != kFormatVersionWithPeriods) {
-        throw PersistenceVersionException("unsupported snapshot version: " + versionText);
-    }
-    ++index;
+    // Built in local objects: a failure anywhere below destroys them, and
+    // no LoadedSession is ever produced.
+    auto chart = std::make_unique<domain::ChartOfAccounts>();
+    auto ledgerPtr = std::make_unique<ledger::Ledger>(currency);
+    auto registry = std::make_unique<computed::ComputedAccountRegistry>();
 
-    skipBlank();
-    if (index >= lines.size()) {
-        throw PersistenceFormatException("truncated file: missing CURRENCY record");
-    }
-    {
-        const std::vector<std::string> currencyTokens = tokenizeRecordLine(lines[index], index + 1);
-        if (currencyTokens.size() != 2 || currencyTokens[0] != "CURRENCY") {
-            throw PersistenceFormatException("expected CURRENCY record at line " + std::to_string(index + 1));
+    // A snapshot is a final-state snapshot: PERIOD records say which
+    // periods exist and whether each is *currently* closed, not when it was
+    // closed. So periods are collected as they are read and applied only
+    // after every journal record has been replayed; where a PERIOD record
+    // sits in the file carries no meaning.
+    std::vector<PendingPeriod> pendingPeriods;
+
+    while (true) {
+        skipBlankLines(lines, index);
+        if (index >= lines.size()) {
+            break;
         }
+        const std::size_t lineNumber = index + 1;
+        const std::vector<std::string> tokens = tokenizeRecordLine(lines[index], lineNumber);
         ++index;
-
-        const domain::Currency currency(currencyTokens[1]);
-
-        auto chart = std::make_unique<domain::ChartOfAccounts>();
-        auto ledgerPtr = std::make_unique<ledger::Ledger>(currency);
-        auto registry = std::make_unique<computed::ComputedAccountRegistry>();
-
-        // A snapshot is a final-state snapshot: PERIOD records say which
-        // periods exist and whether each is *currently* closed, not when it
-        // was closed. So periods are validated as they are read but applied
-        // only after every journal record has been replayed (see below);
-        // where a PERIOD record sits in the file carries no meaning.
-        struct PendingPeriod {
-            domain::Period period;
-            bool closed;
-        };
-        std::vector<PendingPeriod> pendingPeriods;
-
-        while (true) {
-            skipBlank();
-            if (index >= lines.size()) {
-                break;
-            }
-            const std::size_t lineNumber = index + 1;
-            std::vector<std::string> tokens = tokenizeRecordLine(lines[index], lineNumber);
-            ++index;
-            if (tokens.empty()) {
-                continue;
-            }
-            const std::string& recordType = tokens[0];
-
-            if (recordType == "ACCOUNT") {
-                parseAccountRecord(tokens, lineNumber, *chart, *ledgerPtr);
-            } else if (recordType == "ENTRY" || recordType == "CLOSING") {
-                const bool isClosing = recordType == "CLOSING";
-                if (isClosing && version < kFormatVersionWithClosing) {
-                    throw PersistenceFormatException("CLOSING record at line " + std::to_string(lineNumber)
-                                                      + " requires snapshot format v2");
-                }
-                if (tokens.size() != 3) {
-                    throw PersistenceFormatException("malformed " + recordType + " record at line "
-                                                      + std::to_string(lineNumber));
-                }
-                const std::int64_t nanos = parseInt64Field(tokens[1], recordType + " date", lineNumber);
-                if (nanos < kMinSupportedNanos || nanos >= kEndOfSupportedNanos) {
-                    throw PersistenceFormatException(recordType + " date " + tokens[1] + " at line "
-                                                      + std::to_string(lineNumber)
-                                                      + " is outside the supported range "
-                                                        "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)");
-                }
-                const std::chrono::system_clock::time_point date = timePointFromNanos(nanos);
-                const std::string& description = tokens[2];
-
-                // Both kinds are rebuilt through validated domain
-                // construction and replayed through posting::post(), which
-                // also re-checks a closing entry's shape.
-                std::vector<domain::JournalEntryLine> entryLines = parseEntryLines(lines, index, *chart, currency);
-                const domain::JournalEntry entry =
-                    isClosing ? domain::JournalEntry::createClosing(date, description, std::move(entryLines))
-                              : domain::JournalEntry::create(date, description, std::move(entryLines));
-                posting::post(entry, *chart, *ledgerPtr);
-            } else if (recordType == "PERIOD") {
-                if (version < kFormatVersionWithPeriods) {
-                    throw PersistenceFormatException("PERIOD record at line " + std::to_string(lineNumber)
-                                                      + " requires snapshot format v3");
-                }
-                if (tokens.size() != 4) {
-                    throw PersistenceFormatException("malformed PERIOD record at line " + std::to_string(lineNumber));
-                }
-                const std::int64_t startNanos = parseInt64Field(tokens[1], "PERIOD start", lineNumber);
-                const std::int64_t endNanos = parseInt64Field(tokens[2], "PERIOD end", lineNumber);
-                if (startNanos < kMinSupportedNanos || startNanos >= kEndOfSupportedNanos
-                    || endNanos <= kMinSupportedNanos || endNanos > kEndOfSupportedNanos) {
-                    throw PersistenceFormatException("PERIOD bounds at line " + std::to_string(lineNumber)
-                                                      + " are outside the supported date range");
-                }
-                const std::string& state = tokens[3];
-                if (state != "OPEN" && state != "CLOSED") {
-                    throw PersistenceFormatException("unknown PERIOD state '" + state + "' at line "
-                                                      + std::to_string(lineNumber));
-                }
-                // start >= end fails here (domain::InvalidPeriodException);
-                // overlaps and duplicates fail when the periods are applied.
-                pendingPeriods.push_back(
-                    PendingPeriod{domain::Period(timePointFromNanos(startNanos), timePointFromNanos(endNanos)),
-                                  state == "CLOSED"});
-            } else if (recordType == "COMPUTED") {
-                if (tokens.size() != 3) {
-                    throw PersistenceFormatException("malformed COMPUTED record at line " + std::to_string(lineNumber));
-                }
-                registry->define(formula::ComputedAccountName(tokens[1]), tokens[2]);
-            } else {
-                throw PersistenceFormatException("unknown record type '" + recordType + "' at line "
-                                                  + std::to_string(lineNumber));
-            }
+        if (tokens.empty()) {
+            continue;
         }
+        const std::string& recordType = tokens[0];
 
-        // The whole journal has now been replayed through posting::post()
-        // with no period closed. Restore the final period state through the
-        // Ledger's own API, so overlapping or duplicate periods
-        // (ledger::AccountingPeriodOverlapException) fail exactly as they
-        // would live. Entries dated inside a now-closed period are
-        // legitimate history: the format records only that the period is
-        // closed, which governs postings made after this load.
-        for (const PendingPeriod& pending : pendingPeriods) {
-            ledgerPtr->defineAccountingPeriod(pending.period);
+        if (recordType == "ACCOUNT") {
+            parseAccountRecord(tokens, lineNumber, *chart, *ledgerPtr);
+        } else if (recordType == "ENTRY" || recordType == "CLOSING") {
+            replayJournalRecord(tokens, lineNumber, version, lines, index, *chart, *ledgerPtr);
+        } else if (recordType == "PERIOD") {
+            pendingPeriods.push_back(parsePeriodRecord(tokens, lineNumber, version));
+        } else if (recordType == "COMPUTED") {
+            defineComputedRecord(tokens, lineNumber, *registry);
+        } else {
+            throw PersistenceFormatException("unknown record type '" + recordType + "' at line "
+                                              + std::to_string(lineNumber));
         }
-        for (const PendingPeriod& pending : pendingPeriods) {
-            if (pending.closed) {
-                ledgerPtr->closeAccountingPeriod(pending.period);
-            }
-        }
-
-        return LoadedSession{std::move(chart), std::move(ledgerPtr), std::move(registry)};
     }
+
+    applyPeriods(pendingPeriods, *ledgerPtr);
+    return LoadedSession{std::move(chart), std::move(ledgerPtr), std::move(registry)};
 }
 
 } // namespace ledgercore::persistence

@@ -15,14 +15,15 @@ namespace ledgercore::trialbalance {
 
 namespace {
 
-void collectLeafAccounts(const domain::Account& account, std::vector<const domain::Account*>& leaves) {
-    if (account.isLeaf()) {
-        leaves.push_back(&account);
-        return;
-    }
-    for (const domain::Account* child : account.children()) {
-        collectLeafAccounts(*child, leaves);
-    }
+// Every leaf (posting) account, via the chart's iterative pre-order walk.
+std::vector<const domain::Account*> collectLeafAccounts(const domain::ChartOfAccounts& chart) {
+    std::vector<const domain::Account*> leaves;
+    chart.forEachAccountPreOrder([&leaves](const domain::Account& account, std::size_t /*depth*/) {
+        if (account.isLeaf()) {
+            leaves.push_back(&account);
+        }
+    });
+    return leaves;
 }
 
 // Replays ledger.postedEntries(), including a whole JournalEntry's lines
@@ -69,6 +70,16 @@ std::unordered_map<std::uint64_t, domain::Money> replayBalances(
     return balances;
 }
 
+// Balance lookup over a replayed balance map; accounts with no replayed
+// activity are zero.
+std::function<domain::Money(domain::AccountId)> lookupIn(
+    const std::unordered_map<std::uint64_t, domain::Money>& balances, const domain::Currency& currency) {
+    return [&balances, &currency](domain::AccountId accountId) {
+        auto it = balances.find(accountId.value());
+        return it == balances.end() ? domain::Money::zero(currency) : it->second;
+    };
+}
+
 } // namespace
 
 TrialBalance::TrialBalance(domain::Currency currency, std::vector<TrialBalanceLine> lines,
@@ -83,56 +94,22 @@ TrialBalance TrialBalance::generate(const domain::ChartOfAccounts& chart, const 
     if (closingEntries == ClosingEntries::Exclude) {
         const std::unordered_map<std::uint64_t, domain::Money> balances =
             replayBalances(chart, ledger, [](const domain::JournalEntry& entry) { return !entry.isClosing(); });
-        return finalize(chart, balances, ledger.currency());
+        return finalize(chart, lookupIn(balances, ledger.currency()), ledger.currency());
     }
-
-    std::vector<const domain::Account*> leaves;
-    for (const domain::Account* root : chart.rootAccounts()) {
-        collectLeafAccounts(*root, leaves);
-    }
-
-    std::vector<TrialBalanceLine> lines;
-    lines.reserve(leaves.size());
-    for (const domain::Account* account : leaves) {
-        const domain::Money balance = ledger.balance(account->id());
-        const domain::DebitCreditAmounts presentation = domain::debitCreditPresentation(account->type(), balance);
-        lines.emplace_back(account->id(), account->code(), account->name(), account->type(), presentation.debit,
-                            presentation.credit);
-    }
-
-    std::sort(lines.begin(), lines.end(), [](const TrialBalanceLine& lhs, const TrialBalanceLine& rhs) {
-        return lhs.accountCode().value() < rhs.accountCode().value();
-    });
-
-    domain::Money totalDebits = domain::Money::zero(ledger.currency());
-    domain::Money totalCredits = domain::Money::zero(ledger.currency());
-    for (const TrialBalanceLine& line : lines) {
-        totalDebits = totalDebits + line.debit();
-        totalCredits = totalCredits + line.credit();
-    }
-
-    if (totalDebits != totalCredits) {
-        throw UnbalancedTrialBalanceException("Trial Balance does not balance: total debits "
-                                               + totalDebits.toString() + " vs total credits "
-                                               + totalCredits.toString());
-    }
-
-    return TrialBalance(ledger.currency(), std::move(lines), std::move(totalDebits), std::move(totalCredits));
+    // The Ledger's cached balances already include every posted entry.
+    return finalize(
+        chart, [&ledger](domain::AccountId accountId) { return ledger.balance(accountId); }, ledger.currency());
 }
 
 TrialBalance TrialBalance::finalize(const domain::ChartOfAccounts& chart,
-                                     const std::unordered_map<std::uint64_t, domain::Money>& balances,
+                                     const std::function<domain::Money(domain::AccountId)>& balanceOf,
                                      const domain::Currency& currency) {
-    std::vector<const domain::Account*> leaves;
-    for (const domain::Account* root : chart.rootAccounts()) {
-        collectLeafAccounts(*root, leaves);
-    }
+    const std::vector<const domain::Account*> leaves = collectLeafAccounts(chart);
 
     std::vector<TrialBalanceLine> lines;
     lines.reserve(leaves.size());
     for (const domain::Account* account : leaves) {
-        auto it = balances.find(account->id().value());
-        const domain::Money balance = (it == balances.end()) ? domain::Money::zero(currency) : it->second;
+        const domain::Money balance = balanceOf(account->id());
         const domain::DebitCreditAmounts presentation = domain::debitCreditPresentation(account->type(), balance);
         lines.emplace_back(account->id(), account->code(), account->name(), account->type(), presentation.debit,
                             presentation.credit);
@@ -167,7 +144,7 @@ TrialBalance TrialBalance::generateAsOf(const domain::ChartOfAccounts& chart, co
             return entry.date() < cutoff && (includeClosing || !entry.isClosing());
         });
 
-    return finalize(chart, balances, ledger.currency());
+    return finalize(chart, lookupIn(balances, ledger.currency()), ledger.currency());
 }
 
 TrialBalance TrialBalance::generateForPeriod(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
@@ -178,7 +155,7 @@ TrialBalance TrialBalance::generateForPeriod(const domain::ChartOfAccounts& char
             return period.contains(entry.date()) && (includeClosing || !entry.isClosing());
         });
 
-    return finalize(chart, balances, ledger.currency());
+    return finalize(chart, lookupIn(balances, ledger.currency()), ledger.currency());
 }
 
 } // namespace ledgercore::trialbalance

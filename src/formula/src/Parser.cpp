@@ -1,8 +1,10 @@
 #include "ledgercore/formula/Parser.h"
 
+#include <algorithm>
 #include <limits>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "ledgercore/formula/FormulaExceptions.h"
@@ -57,7 +59,8 @@ public:
     explicit ParserImpl(std::vector<Token> tokens) : tokens_(std::move(tokens)) {}
 
     AstNodePtr parseExpression() {
-        AstNodePtr result = parseAdditive();
+        std::size_t depth = 0;
+        AstNodePtr result = parseAdditive(depth);
         expect(TokenType::EndOfInput, "Unexpected trailing input");
         return result;
     }
@@ -81,55 +84,96 @@ private:
         }
     }
 
-    AstNodePtr parseAdditive() {
-        AstNodePtr left = parseMultiplicative();
+    void ensureDepth(std::size_t depth, std::size_t offset) const {
+        if (depth > kMaxFormulaDepth) {
+            throw FormulaSyntaxException(
+                "Formula is nested more than " + std::to_string(kMaxFormulaDepth) + " levels deep", offset);
+        }
+    }
+
+    // Guards a recursive descent (into '(' or a unary operator) *before*
+    // it happens, so the parser's own stack is bounded as well.
+    class DescentGuard {
+    public:
+        DescentGuard(const ParserImpl& parser, std::size_t& nesting, std::size_t offset) : nesting_(nesting) {
+            parser.ensureDepth(nesting_ + 1, offset);
+            ++nesting_;
+        }
+        ~DescentGuard() { --nesting_; }
+        DescentGuard(const DescentGuard&) = delete;
+        DescentGuard& operator=(const DescentGuard&) = delete;
+
+    private:
+        std::size_t& nesting_;
+    };
+
+    // Each parse step reports its subtree's depth (1 for a leaf) through
+    // `depth`. Depth is tracked so operator chains -- built in loops, not
+    // by recursion -- are bounded too: evaluating and destroying the AST
+    // recurse once per level. The bound is checked before each node is
+    // allocated.
+    AstNodePtr parseAdditive(std::size_t& depth) {
+        AstNodePtr left = parseMultiplicative(depth);
         while (check(TokenType::Plus) || check(TokenType::Minus)) {
             const BinaryOperator op = check(TokenType::Plus) ? BinaryOperator::Add : BinaryOperator::Subtract;
-            advance();
-            AstNodePtr right = parseMultiplicative();
+            const std::size_t offset = advance().offset;
+            std::size_t rightDepth = 0;
+            AstNodePtr right = parseMultiplicative(rightDepth);
+            depth = 1 + std::max(depth, rightDepth);
+            ensureDepth(depth, offset);
             left = std::make_unique<AstNode>(BinaryExpression{op, std::move(left), std::move(right)});
         }
         return left;
     }
 
-    AstNodePtr parseMultiplicative() {
-        AstNodePtr left = parseUnary();
+    AstNodePtr parseMultiplicative(std::size_t& depth) {
+        AstNodePtr left = parseUnary(depth);
         while (check(TokenType::Star) || check(TokenType::Slash)) {
             const BinaryOperator op = check(TokenType::Star) ? BinaryOperator::Multiply : BinaryOperator::Divide;
-            advance();
-            AstNodePtr right = parseUnary();
+            const std::size_t offset = advance().offset;
+            std::size_t rightDepth = 0;
+            AstNodePtr right = parseUnary(rightDepth);
+            depth = 1 + std::max(depth, rightDepth);
+            ensureDepth(depth, offset);
             left = std::make_unique<AstNode>(BinaryExpression{op, std::move(left), std::move(right)});
         }
         return left;
     }
 
-    AstNodePtr parseUnary() {
+    AstNodePtr parseUnary(std::size_t& depth) {
         if (check(TokenType::Plus) || check(TokenType::Minus)) {
             const UnaryOperator op = check(TokenType::Plus) ? UnaryOperator::Plus : UnaryOperator::Minus;
-            advance();
-            AstNodePtr operand = parseUnary();
+            const std::size_t offset = advance().offset;
+            const DescentGuard guard(*this, nesting_, offset);
+            AstNodePtr operand = parseUnary(depth);
+            depth += 1;
+            ensureDepth(depth, offset);
             return std::make_unique<AstNode>(UnaryExpression{op, std::move(operand)});
         }
-        return parsePrimary();
+        return parsePrimary(depth);
     }
 
-    AstNodePtr parsePrimary() {
+    AstNodePtr parsePrimary(std::size_t& depth) {
         const Token& token = current();
         if (token.type == TokenType::Number) {
             advance();
+            depth = 1;
             return std::make_unique<AstNode>(Literal{parseNumberLiteral(token)});
         }
         if (token.type == TokenType::AccountReference) {
             advance();
+            depth = 1;
             return std::make_unique<AstNode>(AccountReference{domain::AccountCode(token.text)});
         }
         if (token.type == TokenType::ComputedAccountReference) {
             advance();
+            depth = 1;
             return std::make_unique<AstNode>(ComputedAccountReference{ComputedAccountName(token.text)});
         }
         if (token.type == TokenType::LeftParen) {
-            advance();
-            AstNodePtr inner = parseAdditive();
+            const std::size_t offset = advance().offset;
+            const DescentGuard guard(*this, nesting_, offset);
+            AstNodePtr inner = parseAdditive(depth);
             expect(TokenType::RightParen, "Expected ')'");
             advance();
             return inner;
@@ -139,9 +183,27 @@ private:
 
     std::vector<Token> tokens_;
     std::size_t position_ = 0;
+    std::size_t nesting_ = 0;
 };
 
 } // namespace
+
+std::size_t syntaxTreeDepth(const AstNode& root) {
+    std::size_t deepest = 0;
+    std::vector<std::pair<const AstNode*, std::size_t>> pending{{&root, 1}};
+    while (!pending.empty()) {
+        const auto [node, depth] = pending.back();
+        pending.pop_back();
+        deepest = std::max(deepest, depth);
+        if (const auto* unary = std::get_if<UnaryExpression>(&node->value())) {
+            pending.emplace_back(unary->operand.get(), depth + 1);
+        } else if (const auto* binary = std::get_if<BinaryExpression>(&node->value())) {
+            pending.emplace_back(binary->left.get(), depth + 1);
+            pending.emplace_back(binary->right.get(), depth + 1);
+        }
+    }
+    return deepest;
+}
 
 AstNodePtr parse(const std::string& source) {
     ParserImpl parser(tokenize(source));

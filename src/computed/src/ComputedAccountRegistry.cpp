@@ -1,6 +1,7 @@
 #include "ledgercore/computed/ComputedAccountRegistry.h"
 
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -31,6 +32,20 @@ private:
     std::vector<formula::ComputedAccountName>& stack_;
 };
 
+// Adds a definition's syntax-tree depth to the session's running
+// evaluation depth for the duration of its evaluation (exception-safe).
+class DepthGuard {
+public:
+    DepthGuard(std::size_t& depth, std::size_t added) : depth_(depth), added_(added) { depth_ += added_; }
+    ~DepthGuard() { depth_ -= added_; }
+    DepthGuard(const DepthGuard&) = delete;
+    DepthGuard& operator=(const DepthGuard&) = delete;
+
+private:
+    std::size_t& depth_;
+    std::size_t added_;
+};
+
 // Resolves @name references for exactly one top-level
 // ComputedAccountRegistry::evaluate() call: owns the DFS "currently
 // resolving" stack that both detects cycles and, via formula::evaluate's
@@ -38,10 +53,10 @@ private:
 // evaluation of the dependency graph.
 //
 // Freshly constructed per call, so no state persists across separate
-// evaluate() calls -- a value visited and fully resolved on one branch
-// (a diamond dependency) is correctly revisitable on another branch,
-// since it is popped off the stack as soon as its own resolution
-// completes, not memoized.
+// evaluate() calls. Within one call each computed account is evaluated at
+// most once: a value fully resolved on one branch of a diamond dependency
+// is memoized and reused on the others (it is popped off the stack as soon
+// as its own resolution completes, so reusing it is not a cycle).
 class ResolutionSession : public formula::ComputedAccountResolver {
 public:
     ResolutionSession(const ComputedAccountRegistry& registry, const formula::AccountResolver& realResolver)
@@ -54,18 +69,36 @@ public:
             }
         }
 
+        // Already fully resolved earlier in this session (a shared
+        // dependency reached again through another branch): reuse it, so
+        // each computed account is evaluated at most once per evaluate()
+        // call. A resolved account can never be on the stack, so this does
+        // not affect cycle detection above.
+        const auto cached = resolved_.find(name.value());
+        if (cached != resolved_.end()) {
+            return cached->second;
+        }
+
         const ComputedAccountDefinition* definition = registry_.find(name);
         if (definition == nullptr) {
             throw UnknownComputedAccountException("Unknown computed account reference: @" + name.value());
         }
 
+        if (evaluationDepth_ + definition->astDepth() > ComputedAccountRegistry::kMaxEvaluationDepth) {
+            throw ComputedAccountDepthExceededException(
+                "Computed account '" + name.value() + "' nests formulas deeper than the evaluation limit of "
+                + std::to_string(ComputedAccountRegistry::kMaxEvaluationDepth) + " levels");
+        }
+
         const StackGuard guard(stack_, name);
+        const DepthGuard depthGuard(evaluationDepth_, definition->astDepth());
         const formula::FormulaValue result = formula::evaluate(definition->ast(), realResolver_, *this);
 
         if (!result.isMoney()) {
             throw formula::FormulaEvaluationException("Computed account '" + name.value()
                                                         + "' does not evaluate to a Money value");
         }
+        resolved_.emplace(name.value(), result.asMoney());
         return result.asMoney();
     }
 
@@ -88,6 +121,12 @@ private:
     const ComputedAccountRegistry& registry_;
     const formula::AccountResolver& realResolver_;
     mutable std::vector<formula::ComputedAccountName> stack_;
+    // Sum of astDepth() over every definition on stack_.
+    mutable std::size_t evaluationDepth_ = 0;
+    // Memo of fully resolved accounts, owned by this one session: the
+    // ledger and registry cannot change during a single evaluate() call,
+    // and nothing is shared across calls.
+    mutable std::unordered_map<std::string, domain::Money> resolved_;
 };
 
 } // namespace

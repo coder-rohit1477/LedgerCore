@@ -7,7 +7,12 @@
 namespace ledgercore::domain {
 
 Account::Account(AccountId id, AccountCode code, std::string name, AccountType type, Account* parent)
-    : id_(id), code_(std::move(code)), name_(std::move(name)), type_(type), parent_(parent) {
+    : id_(id),
+      code_(std::move(code)),
+      name_(std::move(name)),
+      type_(type),
+      parent_(parent),
+      depth_(parent == nullptr ? 1 : parent->depth_ + 1) {
     if (name_.empty()) {
         throw InvalidAccountException("Account name must not be empty");
     }

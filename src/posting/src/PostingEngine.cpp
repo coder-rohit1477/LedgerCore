@@ -102,14 +102,29 @@ void ensureClosingEntryIsComplete(const domain::JournalEntry& entry, const domai
         }
     }
 
+    // Report the offending account with the lowest AccountCode (the order
+    // TrialBalance and every listing use), never whichever one the hash map
+    // happens to yield first, so the same entry always produces the same
+    // message.
+    const domain::Account* offender = nullptr;
+    const domain::Money* offendingBalance = nullptr;
     for (const auto& [accountIdValue, balance] : temporaryBalances) {
-        if (!balance.isZero()) {
-            const domain::Account* account = chart.findById(domain::AccountId(accountIdValue));
-            throw InvalidClosingEntryException(
-                "A closing entry must bring every Revenue and Expense account to zero as of its cutoff; account "
-                + (account != nullptr ? account->code().value() : std::to_string(accountIdValue)) + " would be left at "
-                + balance.toString());
+        if (balance.isZero()) {
+            continue;
         }
+        const domain::Account* account = chart.findById(domain::AccountId(accountIdValue));
+        if (account == nullptr) {
+            continue;  // unreachable: only chart-resolved accounts are accumulated
+        }
+        if (offender == nullptr || account->code().value() < offender->code().value()) {
+            offender = account;
+            offendingBalance = &balance;
+        }
+    }
+    if (offender != nullptr) {
+        throw InvalidClosingEntryException(
+            "A closing entry must bring every Revenue and Expense account to zero as of its cutoff; account "
+            + offender->code().value() + " would be left at " + offendingBalance->toString());
     }
 }
 

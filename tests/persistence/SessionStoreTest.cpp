@@ -1911,6 +1911,146 @@ TEST(SessionStoreTest, JournalQueriesAreIdenticalAfterReloadForEachFormatVersion
 }
 
 // ---------------------------------------------------------------------
+// Phase 20: bounded charts/formulas, unchanged output, mutation smoke
+// ---------------------------------------------------------------------
+
+namespace {
+
+// A v1 snapshot whose chart is a single chain `levels` deep (D1 ... Dn).
+std::string chainSnapshot(std::size_t levels) {
+    std::string text = "LEDGERCORE-SNAPSHOT v1\nCURRENCY USD\nACCOUNT ROOT D1 Asset \"Deep\"\n";
+    text.reserve(levels * 32);
+    for (std::size_t level = 2; level <= levels; ++level) {
+        text += "ACCOUNT CHILD D" + std::to_string(level - 1) + " D" + std::to_string(level) + " \"Deep\"\n";
+    }
+    return text;
+}
+
+} // namespace
+
+TEST(SessionStoreTest, SavedAccountOrderIsExactlyTheEstablishedPreOrder) {
+    // Golden output: parent before children, roots and children in
+    // insertion order -- unchanged by the iterative writer.
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& current = ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1100"), "Current");
+    chart.addRootAccount(AccountCode("2000"), "Payable", AccountType::Liability);
+    ledgercore::posting::addChildAccount(chart, ledger, current, AccountCode("1110"), "Cash");
+    ledgercore::posting::addChildAccount(chart, ledger, assets, AccountCode("1200"), "Fixed");
+    ledgercore::posting::addChildAccount(chart, ledger, current, AccountCode("1120"), "Receivables");
+
+    const ScopedTempFile file(uniqueTempPath("golden_order"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    EXPECT_EQ(readRawFile(file.path()), "LEDGERCORE-SNAPSHOT v1\n"
+                                        "CURRENCY USD\n"
+                                        "ACCOUNT ROOT 1000 Asset \"Assets\"\n"
+                                        "ACCOUNT CHILD 1000 1100 \"Current\"\n"
+                                        "ACCOUNT CHILD 1100 1110 \"Cash\"\n"
+                                        "ACCOUNT CHILD 1100 1120 \"Receivables\"\n"
+                                        "ACCOUNT CHILD 1000 1200 \"Fixed\"\n"
+                                        "ACCOUNT ROOT 2000 Liability \"Payable\"\n");
+}
+
+TEST(SessionStoreTest, MaximumDepthChartSavesLoadsAndSavesIdentically) {
+    const ScopedTempFile source(uniqueTempPath("max_depth_source"));
+    writeRawFile(source.path(), chainSnapshot(ChartOfAccounts::kMaxDepth));
+    LoadedSession loaded = ledgercore::persistence::load(source.path());
+    EXPECT_NE(loaded.chart->findByCode(AccountCode("D" + std::to_string(ChartOfAccounts::kMaxDepth))), nullptr);
+    EXPECT_EQ(TrialBalance::generate(*loaded.chart, *loaded.ledger).lines().size(), 1u);
+
+    const ScopedTempFile resaved(uniqueTempPath("max_depth_resaved"));
+    ledgercore::persistence::save(*loaded.chart, *loaded.ledger, *loaded.computedAccounts, resaved.path());
+    EXPECT_EQ(readRawFile(resaved.path()), readRawFile(source.path()));
+}
+
+TEST(SessionStoreTest, SnapshotDeeperThanTheMaximumIsRejectedCleanly) {
+    for (std::size_t levels : {ChartOfAccounts::kMaxDepth + 1, static_cast<std::size_t>(100000)}) {
+        const ScopedTempFile file(uniqueTempPath("too_deep"));
+        writeRawFile(file.path(), chainSnapshot(levels));
+        try {
+            ledgercore::persistence::load(file.path());
+            FAIL() << "expected rejection at " << levels << " levels";
+        } catch (const ledgercore::domain::ChartDepthExceededException& e) {
+            EXPECT_EQ(std::string(e.what()), "Cannot add a child to account D1000: the account tree may be at most "
+                                             "1000 levels deep");
+        }
+    }
+}
+
+TEST(SessionStoreTest, ComputedRecordWithAnAdversariallyDeepFormulaIsRejectedCleanly) {
+    const ScopedTempFile file(uniqueTempPath("deep_formula"));
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v1\nCURRENCY USD\nCOMPUTED Deep \"" + std::string(100000, '(')
+                                  + "1" + std::string(100000, ')') + "\"\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::formula::FormulaSyntaxException);
+}
+
+TEST(SessionStoreTest, MutatedSnapshotsFailCleanlyOrLoad) {
+    // Fuzz smoke: thousands of seeded corruptions of valid v1/v2/v3
+    // snapshots (byte flips, insertions, deletions, truncations, line
+    // shuffles). Every outcome must be a successful load or a LedgerCore
+    // exception -- never a crash or a foreign exception type. Runs under
+    // ASan/UBSan in CI.
+    std::vector<std::string> seeds;
+    {
+        PeriodSession session;  // v3: periods, entries, computed
+        const ScopedTempFile file(uniqueTempPath("mutation_seed_v3"));
+        ledgercore::persistence::save(session.chart, session.ledger, session.registry, file.path());
+        seeds.push_back(readRawFile(file.path()));
+    }
+    {
+        ChartOfAccounts chart;
+        Ledger ledger(Currency("USD"));
+        ComputedAccountRegistry registry;
+        setUpClosedYear(chart, ledger);  // v2: closing entry
+        const ScopedTempFile file(uniqueTempPath("mutation_seed_v2"));
+        ledgercore::persistence::save(chart, ledger, registry, file.path());
+        seeds.push_back(readRawFile(file.path()));
+    }
+    seeds.push_back(chainSnapshot(50));  // v1: deep-ish chart
+
+    std::mt19937_64 rng(20251003);
+    const std::string alphabet = "0123456789-+ \"\\\nACDEGIMNOPRSTUVXYZ#@().*/";
+    std::size_t loaded = 0;
+    std::size_t rejected = 0;
+    const ScopedTempFile file(uniqueTempPath("mutation"));
+    for (int iteration = 0; iteration < 3000; ++iteration) {
+        std::string text = seeds[static_cast<std::size_t>(iteration) % seeds.size()];
+        const int edits = 1 + static_cast<int>(rng() % 4);
+        for (int e = 0; e < edits && !text.empty(); ++e) {
+            const std::size_t at = rng() % text.size();
+            switch (rng() % 5) {
+                case 0: text[at] = alphabet[rng() % alphabet.size()]; break;
+                case 1: text.insert(at, 1, alphabet[rng() % alphabet.size()]); break;
+                case 2: text.erase(at, 1 + rng() % 8); break;
+                case 3: text.resize(at); break;
+                default: {
+                    const std::size_t lineStart = text.rfind('\n', at);
+                    const std::size_t from = lineStart == std::string::npos ? 0 : lineStart + 1;
+                    const std::size_t lineEnd = text.find('\n', from);
+                    if (lineEnd != std::string::npos) {
+                        text.insert(0, text.substr(from, lineEnd - from + 1));  // duplicate a line at the top
+                    }
+                }
+            }
+        }
+        writeRawFile(file.path(), text);
+        try {
+            ledgercore::persistence::load(file.path());
+            ++loaded;
+        } catch (const ledgercore::LedgerException&) {
+            ++rejected;
+        } catch (const PersistenceException&) {
+            ++rejected;
+        }
+    }
+    EXPECT_EQ(loaded + rejected, 3000u);
+    EXPECT_GT(rejected, 0u);
+}
+
+// ---------------------------------------------------------------------
 // Property-style tests
 // ---------------------------------------------------------------------
 

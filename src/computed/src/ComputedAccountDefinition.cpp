@@ -7,6 +7,9 @@
 namespace ledgercore::computed {
 
 ComputedAccountDefinition::ComputedAccountDefinition(formula::ComputedAccountName name, std::string formulaSource)
-    : name_(std::move(name)), formulaSource_(std::move(formulaSource)), ast_(formula::parse(formulaSource_)) {}
+    : name_(std::move(name)),
+      formulaSource_(std::move(formulaSource)),
+      ast_(formula::parse(formulaSource_)),
+      astDepth_(formula::syntaxTreeDepth(*ast_)) {}
 
 } // namespace ledgercore::computed
