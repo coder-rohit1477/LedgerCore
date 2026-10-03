@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "ledgercore/domain/Account.h"
+#include "ledgercore/domain/JournalEntry.h"
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/NormalBalance.h"
 #include "ledgercore/ledger/PostedJournalEntry.h"
@@ -25,7 +26,7 @@ void collectLeafAccounts(const domain::Account& account, std::vector<const domai
 }
 
 // Replays ledger.postedEntries(), including a whole JournalEntry's lines
-// only when includeEntry(entry.date()) is true, and accumulates each
+// only when includeEntry(entry) is true, and accumulates each
 // account's normal-balance-signed net via domain::signedEffect() --
 // the same effect calculation PostingEngine itself uses, applied here to
 // a date-filtered subset of history instead of a single new entry.
@@ -41,11 +42,11 @@ void collectLeafAccounts(const domain::Account& account, std::vector<const domai
 // exactly like generate()'s own handling of a mismatched pair.
 std::unordered_map<std::uint64_t, domain::Money> replayBalances(
     const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
-    const std::function<bool(std::chrono::system_clock::time_point)>& includeEntry) {
+    const std::function<bool(const domain::JournalEntry&)>& includeEntry) {
     std::unordered_map<std::uint64_t, domain::Money> balances;
 
     for (const ledger::PostedJournalEntry& posted : ledger.postedEntries()) {
-        if (!includeEntry(posted.entry().date())) {
+        if (!includeEntry(posted.entry())) {
             continue;
         }
         for (const domain::JournalEntryLine& line : posted.entry().lines()) {
@@ -77,7 +78,14 @@ TrialBalance::TrialBalance(domain::Currency currency, std::vector<TrialBalanceLi
       totalDebits_(std::move(totalDebits)),
       totalCredits_(std::move(totalCredits)) {}
 
-TrialBalance TrialBalance::generate(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger) {
+TrialBalance TrialBalance::generate(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
+                                    ClosingEntries closingEntries) {
+    if (closingEntries == ClosingEntries::Exclude) {
+        const std::unordered_map<std::uint64_t, domain::Money> balances =
+            replayBalances(chart, ledger, [](const domain::JournalEntry& entry) { return !entry.isClosing(); });
+        return finalize(chart, balances, ledger.currency());
+    }
+
     std::vector<const domain::Account*> leaves;
     for (const domain::Account* root : chart.rootAccounts()) {
         collectLeafAccounts(*root, leaves);
@@ -151,17 +159,24 @@ TrialBalance TrialBalance::finalize(const domain::ChartOfAccounts& chart,
 }
 
 TrialBalance TrialBalance::generateAsOf(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
-                                         std::chrono::system_clock::time_point cutoff) {
+                                         std::chrono::system_clock::time_point cutoff,
+                                         ClosingEntries closingEntries) {
+    const bool includeClosing = closingEntries == ClosingEntries::Include;
     const std::unordered_map<std::uint64_t, domain::Money> balances =
-        replayBalances(chart, ledger, [cutoff](std::chrono::system_clock::time_point date) { return date < cutoff; });
+        replayBalances(chart, ledger, [cutoff, includeClosing](const domain::JournalEntry& entry) {
+            return entry.date() < cutoff && (includeClosing || !entry.isClosing());
+        });
 
     return finalize(chart, balances, ledger.currency());
 }
 
 TrialBalance TrialBalance::generateForPeriod(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
-                                              const domain::Period& period) {
-    const std::unordered_map<std::uint64_t, domain::Money> balances = replayBalances(
-        chart, ledger, [&period](std::chrono::system_clock::time_point date) { return period.contains(date); });
+                                              const domain::Period& period, ClosingEntries closingEntries) {
+    const bool includeClosing = closingEntries == ClosingEntries::Include;
+    const std::unordered_map<std::uint64_t, domain::Money> balances =
+        replayBalances(chart, ledger, [&period, includeClosing](const domain::JournalEntry& entry) {
+            return period.contains(entry.date()) && (includeClosing || !entry.isClosing());
+        });
 
     return finalize(chart, balances, ledger.currency());
 }

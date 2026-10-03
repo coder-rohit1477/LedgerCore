@@ -8,6 +8,7 @@
 
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountId.h"
+#include "ledgercore/domain/AccountType.h"
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/domain/NormalBalance.h"
 #include "ledgercore/ledger/LedgerExceptions.h"
@@ -40,6 +41,23 @@ ledger::PostingId post(const domain::JournalEntry& entry,
                 "Cannot post to non-leaf (group) account: " + account->code().value());
         }
         resolvedAccounts.push_back(account);
+    }
+
+    if (entry.isClosing()) {
+        bool touchesTemporaryAccount = false;
+        for (const domain::Account* account : resolvedAccounts) {
+            const domain::AccountType type = account->type();
+            if (type == domain::AccountType::Revenue || type == domain::AccountType::Expense) {
+                touchesTemporaryAccount = true;
+            } else if (type != domain::AccountType::Equity) {
+                throw InvalidClosingEntryException("A closing entry may only post to Revenue, Expense, and Equity "
+                                                   "accounts, not to account "
+                                                   + account->code().value());
+            }
+        }
+        if (!touchesTemporaryAccount) {
+            throw InvalidClosingEntryException("A closing entry must close at least one Revenue or Expense account");
+        }
     }
 
     // Phase 2: compute. Aggregate duplicate AccountId lines into one net

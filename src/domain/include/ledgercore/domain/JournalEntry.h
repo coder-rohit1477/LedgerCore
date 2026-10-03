@@ -10,6 +10,22 @@
 
 namespace ledgercore::domain {
 
+// What a JournalEntry represents, fixed at creation.
+//
+// Standard: ordinary business activity.
+// Closing:  a period-end closing entry that transfers Revenue/Expense
+//           balances into an Equity (retained earnings) account. It is a
+//           genuine balanced posting -- trial balances and balance sheets
+//           include it like any other entry -- but it is not revenue or
+//           expense *activity*, so income statements can exclude it (see
+//           trialbalance::ClosingEntries). posting::post() enforces that a
+//           Closing entry touches only Revenue, Expense, and Equity
+//           accounts, so the marker can never hide ordinary activity.
+enum class JournalEntryKind {
+    Standard,
+    Closing
+};
+
 // An immutable, internally-balanced double-entry transaction: a date, a
 // required description, and a fixed set of lines.
 //
@@ -40,6 +56,13 @@ public:
                                 std::string description,
                                 std::vector<JournalEntryLine> lines);
 
+    // Identical validation to create(), but the entry's kind() is
+    // JournalEntryKind::Closing. Normally produced by
+    // closing::closeTemporaryAccounts() rather than called directly.
+    static JournalEntry createClosing(std::chrono::system_clock::time_point date,
+                                       std::string description,
+                                       std::vector<JournalEntryLine> lines);
+
     std::chrono::system_clock::time_point date() const noexcept { return date_; }
     const std::string& description() const noexcept { return description_; }
     const std::vector<JournalEntryLine>& lines() const noexcept { return lines_; }
@@ -48,13 +71,22 @@ public:
     const Money& totalDebits() const noexcept { return totalDebits_; }
     const Money& totalCredits() const noexcept { return totalCredits_; }
 
+    JournalEntryKind kind() const noexcept { return kind_; }
+    bool isClosing() const noexcept { return kind_ == JournalEntryKind::Closing; }
+
 private:
+    static JournalEntry createValidated(std::chrono::system_clock::time_point date,
+                                        std::string description,
+                                        std::vector<JournalEntryLine> lines,
+                                        JournalEntryKind kind);
+
     JournalEntry(std::chrono::system_clock::time_point date,
                  std::string description,
                  std::vector<JournalEntryLine> lines,
                  Currency currency,
                  Money totalDebits,
-                 Money totalCredits);
+                 Money totalCredits,
+                 JournalEntryKind kind);
 
     std::chrono::system_clock::time_point date_;
     std::string description_;
@@ -62,6 +94,7 @@ private:
     Currency currency_;
     Money totalDebits_;
     Money totalCredits_;
+    JournalEntryKind kind_;
 };
 
 } // namespace ledgercore::domain

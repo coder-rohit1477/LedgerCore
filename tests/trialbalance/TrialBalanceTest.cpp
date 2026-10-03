@@ -1468,3 +1468,79 @@ TEST(TrialBalancePropertyTest, RandomBalancedPostingSequencesRespectPeriodBounda
     }
     EXPECT_EQ(actual.totalDebits(), actual.totalCredits());
 }
+
+// ---------------------------------------------------------------------
+// ClosingEntries::Include / Exclude
+// ---------------------------------------------------------------------
+
+namespace {
+
+struct ClosedBooks {
+    Currency usd{"USD"};
+    ChartOfAccounts chart;
+    Ledger ledger{Currency("USD")};
+    AccountId cash{0};
+    AccountId sales{0};
+    AccountId retained{0};
+    ClosedBooks() {
+        cash = chart.addRootAccount(AccountCode("1000"), "Cash", AccountType::Asset).id();
+        retained = chart.addRootAccount(AccountCode("3100"), "Retained", AccountType::Equity).id();
+        sales = chart.addRootAccount(AccountCode("4000"), "Sales", AccountType::Revenue).id();
+        post(JournalEntry::create(day(10), "Sale",
+                                  {JournalEntryLine::debit(cash, Money::fromMajorUnits(80, 0, usd)),
+                                   JournalEntryLine::credit(sales, Money::fromMajorUnits(80, 0, usd))}),
+             chart, ledger);
+        post(JournalEntry::createClosing(day(20), "Close",
+                                         {JournalEntryLine::debit(sales, Money::fromMajorUnits(80, 0, usd)),
+                                          JournalEntryLine::credit(retained, Money::fromMajorUnits(80, 0, usd))}),
+             chart, ledger);
+    }
+};
+
+} // namespace
+
+TEST(TrialBalanceTest, ClosingEntriesAreIncludedByDefaultInEveryForm) {
+    ClosedBooks b;
+    const TrialBalance cumulative = TrialBalance::generate(b.chart, b.ledger);
+    const TrialBalance asOf = TrialBalance::generateAsOf(b.chart, b.ledger, day(30));
+    const TrialBalance period = TrialBalance::generateForPeriod(b.chart, b.ledger, Period(day(0), day(30)));
+    for (const TrialBalance* tb : {&cumulative, &asOf, &period}) {
+        EXPECT_TRUE(findLine(*tb, b.sales).credit().isZero());
+        EXPECT_EQ(findLine(*tb, b.retained).credit(), Money::fromMajorUnits(80, 0, b.usd));
+        EXPECT_EQ(tb->totalDebits(), tb->totalCredits());
+    }
+}
+
+TEST(TrialBalanceTest, ExcludingClosingEntriesRestoresOperatingActivityInEveryForm) {
+    ClosedBooks b;
+    using ledgercore::trialbalance::ClosingEntries;
+    const TrialBalance cumulative = TrialBalance::generate(b.chart, b.ledger, ClosingEntries::Exclude);
+    const TrialBalance asOf = TrialBalance::generateAsOf(b.chart, b.ledger, day(30), ClosingEntries::Exclude);
+    const TrialBalance period =
+        TrialBalance::generateForPeriod(b.chart, b.ledger, Period(day(0), day(30)), ClosingEntries::Exclude);
+    for (const TrialBalance* tb : {&cumulative, &asOf, &period}) {
+        EXPECT_EQ(findLine(*tb, b.sales).credit(), Money::fromMajorUnits(80, 0, b.usd));
+        EXPECT_TRUE(findLine(*tb, b.retained).credit().isZero());
+        EXPECT_EQ(tb->totalDebits(), tb->totalCredits());
+    }
+}
+
+TEST(TrialBalanceTest, ExcludeHasNoEffectWithoutClosingEntries) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    const AccountId cash = chart.addRootAccount(AccountCode("1000"), "Cash", AccountType::Asset).id();
+    const AccountId sales = chart.addRootAccount(AccountCode("4000"), "Sales", AccountType::Revenue).id();
+    post(JournalEntry::create(day(1), "Sale",
+                              {JournalEntryLine::debit(cash, Money::fromMajorUnits(7, 0, usd)),
+                               JournalEntryLine::credit(sales, Money::fromMajorUnits(7, 0, usd))}),
+         chart, ledger);
+    using ledgercore::trialbalance::ClosingEntries;
+    const TrialBalance included = TrialBalance::generate(chart, ledger);
+    const TrialBalance excluded = TrialBalance::generate(chart, ledger, ClosingEntries::Exclude);
+    ASSERT_EQ(included.lines().size(), excluded.lines().size());
+    for (std::size_t i = 0; i < included.lines().size(); ++i) {
+        EXPECT_EQ(included.lines()[i].debit(), excluded.lines()[i].debit());
+        EXPECT_EQ(included.lines()[i].credit(), excluded.lines()[i].credit());
+    }
+}

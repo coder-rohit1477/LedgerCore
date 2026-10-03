@@ -19,6 +19,7 @@ using ledgercore::domain::DebitCreditSide;
 using ledgercore::domain::InvalidJournalEntryException;
 using ledgercore::domain::InvalidJournalEntryLineException;
 using ledgercore::domain::JournalEntry;
+using ledgercore::domain::JournalEntryKind;
 using ledgercore::domain::JournalEntryLine;
 using ledgercore::domain::Money;
 using ledgercore::domain::UnbalancedJournalEntryException;
@@ -396,4 +397,50 @@ TEST(JournalEntryPropertyTest, PerturbedEntriesAlwaysRejectedAsUnbalanced) {
 
         EXPECT_THROW(JournalEntry::create(testDate(), "Perturbed entry", lines), UnbalancedJournalEntryException);
     }
+}
+
+// ---------------------------------------------------------------------
+// JournalEntryKind
+// ---------------------------------------------------------------------
+
+TEST(JournalEntryTest, CreateProducesStandardEntry) {
+    Currency usd("USD");
+    const JournalEntry entry = JournalEntry::create(
+        testDate(), "Sale",
+        {JournalEntryLine::debit(AccountId(1), Money::fromMajorUnits(5, 0, usd)),
+         JournalEntryLine::credit(AccountId(2), Money::fromMajorUnits(5, 0, usd))});
+    EXPECT_EQ(entry.kind(), JournalEntryKind::Standard);
+    EXPECT_FALSE(entry.isClosing());
+}
+
+TEST(JournalEntryTest, CreateClosingProducesClosingEntryWithSameContent) {
+    Currency usd("USD");
+    const auto date = testDate();
+    const JournalEntry entry = JournalEntry::createClosing(
+        date, "Close",
+        {JournalEntryLine::debit(AccountId(4), Money::fromMajorUnits(5, 0, usd)),
+         JournalEntryLine::credit(AccountId(3), Money::fromMajorUnits(5, 0, usd))});
+    EXPECT_EQ(entry.kind(), JournalEntryKind::Closing);
+    EXPECT_TRUE(entry.isClosing());
+    EXPECT_EQ(entry.date(), date);
+    EXPECT_EQ(entry.description(), "Close");
+    EXPECT_EQ(entry.lines().size(), 2u);
+    EXPECT_EQ(entry.totalDebits(), Money::fromMajorUnits(5, 0, usd));
+}
+
+TEST(JournalEntryTest, CreateClosingAppliesTheSameValidationAsCreate) {
+    Currency usd("USD");
+    EXPECT_THROW(JournalEntry::createClosing(testDate(), "Close",
+                                             {JournalEntryLine::debit(AccountId(4), Money::fromMajorUnits(5, 0, usd)),
+                                              JournalEntryLine::credit(AccountId(3),
+                                                                       Money::fromMajorUnits(4, 0, usd))}),
+                 UnbalancedJournalEntryException);
+    EXPECT_THROW(JournalEntry::createClosing(testDate(), "Close",
+                                             {JournalEntryLine::debit(AccountId(4), Money::fromMajorUnits(5, 0, usd))}),
+                 InvalidJournalEntryException);
+    EXPECT_THROW(JournalEntry::createClosing(testDate(), "",
+                                             {JournalEntryLine::debit(AccountId(4), Money::fromMajorUnits(5, 0, usd)),
+                                              JournalEntryLine::credit(AccountId(3),
+                                                                       Money::fromMajorUnits(5, 0, usd))}),
+                 InvalidJournalEntryException);
 }

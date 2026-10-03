@@ -27,7 +27,14 @@ namespace ledgercore::persistence {
 
 namespace {
 
-constexpr int kFormatVersion = 1;
+// v1: ACCOUNT, ENTRY, COMPUTED records.
+// v2: v1 plus CLOSING records (JournalEntryKind::Closing entries, same
+//     layout as ENTRY). save() writes v2 only when the ledger actually
+//     contains a closing entry, so every snapshot without one stays
+//     byte-identical v1 and readable by v1-only builds; a v1-only build
+//     rejects a v2 file by version rather than misreading CLOSING.
+constexpr int kFormatVersionV1 = 1;
+constexpr int kFormatVersionWithClosing = 2;
 constexpr char kHeaderPrefix[] = "LEDGERCORE-SNAPSHOT v";
 
 // ---------------------------------------------------------------------
@@ -259,7 +266,11 @@ void writeAccountsPreOrder(std::ostream& out, const domain::Account& account, co
 
 void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
                     const computed::ComputedAccountRegistry& computedAccounts) {
-    out << kHeaderPrefix << kFormatVersion << '\n';
+    bool hasClosingEntry = false;
+    for (const ledger::PostedJournalEntry& posted : ledger.postedEntries()) {
+        hasClosingEntry = hasClosingEntry || posted.entry().isClosing();
+    }
+    out << kHeaderPrefix << (hasClosingEntry ? kFormatVersionWithClosing : kFormatVersionV1) << '\n';
     out << "CURRENCY " << ledger.currency().code() << '\n';
 
     for (const domain::Account* root : chart.rootAccounts()) {
@@ -273,7 +284,7 @@ void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, cons
                                         + "\" has a date outside the supported range "
                                           "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)");
         }
-        out << "ENTRY " << nanosSinceEpoch(entry.date()) << ' ' << escapeQuoted(entry.description()) << '\n';
+        out << (entry.isClosing() ? "CLOSING " : "ENTRY ") << nanosSinceEpoch(entry.date()) << ' ' << escapeQuoted(entry.description()) << '\n';
         for (const domain::JournalEntryLine& line : entry.lines()) {
             const domain::Account* account = chart.findById(line.accountId());
             if (account == nullptr) {
@@ -466,7 +477,7 @@ LoadedSession load(const std::filesystem::path& path) {
     }
     const std::string versionText = headerLine.substr(std::char_traits<char>::length(kHeaderPrefix));
     const std::int64_t version = parseInt64Field(versionText, "header version", index + 1);
-    if (version != kFormatVersion) {
+    if (version != kFormatVersionV1 && version != kFormatVersionWithClosing) {
         throw PersistenceVersionException("unsupported snapshot version: " + versionText);
     }
     ++index;
@@ -503,21 +514,33 @@ LoadedSession load(const std::filesystem::path& path) {
 
             if (recordType == "ACCOUNT") {
                 parseAccountRecord(tokens, lineNumber, *chart, *ledgerPtr);
-            } else if (recordType == "ENTRY") {
-                if (tokens.size() != 3) {
-                    throw PersistenceFormatException("malformed ENTRY record at line " + std::to_string(lineNumber));
+            } else if (recordType == "ENTRY" || recordType == "CLOSING") {
+                const bool isClosing = recordType == "CLOSING";
+                if (isClosing && version < kFormatVersionWithClosing) {
+                    throw PersistenceFormatException("CLOSING record at line " + std::to_string(lineNumber)
+                                                      + " requires snapshot format v2");
                 }
-                const std::int64_t nanos = parseInt64Field(tokens[1], "ENTRY date", lineNumber);
+                if (tokens.size() != 3) {
+                    throw PersistenceFormatException("malformed " + recordType + " record at line "
+                                                      + std::to_string(lineNumber));
+                }
+                const std::int64_t nanos = parseInt64Field(tokens[1], recordType + " date", lineNumber);
                 if (nanos < kMinSupportedNanos || nanos >= kEndOfSupportedNanos) {
-                    throw PersistenceFormatException("ENTRY date " + tokens[1] + " at line " + std::to_string(lineNumber)
+                    throw PersistenceFormatException(recordType + " date " + tokens[1] + " at line "
+                                                      + std::to_string(lineNumber)
                                                       + " is outside the supported range "
                                                         "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)");
                 }
                 const std::chrono::system_clock::time_point date = timePointFromNanos(nanos);
                 const std::string& description = tokens[2];
 
+                // Both kinds are rebuilt through validated domain
+                // construction and replayed through posting::post(), which
+                // also re-checks a closing entry's shape.
                 std::vector<domain::JournalEntryLine> entryLines = parseEntryLines(lines, index, *chart, currency);
-                const domain::JournalEntry entry = domain::JournalEntry::create(date, description, std::move(entryLines));
+                const domain::JournalEntry entry =
+                    isClosing ? domain::JournalEntry::createClosing(date, description, std::move(entryLines))
+                              : domain::JournalEntry::create(date, description, std::move(entryLines));
                 posting::post(entry, *chart, *ledgerPtr);
             } else if (recordType == "COMPUTED") {
                 if (tokens.size() != 3) {

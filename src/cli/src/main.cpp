@@ -10,6 +10,7 @@
 #include "LedgerSession.h"
 #include "OutputFormatting.h"
 
+#include "ledgercore/closing/ClosingEngine.h"
 #include "ledgercore/computed/LedgerAccountResolver.h"
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountCode.h"
@@ -128,12 +129,18 @@ void executeBalanceSheet(const ParsedCommand& pc, LedgerSession& session, std::o
     printBalanceSheet(out, reporting::BalanceSheet::generate(tb), reporting::IncomeStatement::generate(tb));
 }
 
+// An income statement reports operating activity, so closing entries
+// (which only move already-earned results into retained earnings) are
+// excluded -- closing a period never erases that period's income
+// statement. Trial balance and balance sheet keep including them.
 trialbalance::TrialBalance buildIncomeStatementTrialBalance(const ParsedCommand& pc, LedgerSession& session) {
     if (!pc.from.empty()) {
         const domain::Period period(parseDate(pc.from), parseDate(pc.to));
-        return trialbalance::TrialBalance::generateForPeriod(session.chart(), session.ledger(), period);
+        return trialbalance::TrialBalance::generateForPeriod(session.chart(), session.ledger(), period,
+                                                             trialbalance::ClosingEntries::Exclude);
     }
-    return trialbalance::TrialBalance::generate(session.chart(), session.ledger());
+    return trialbalance::TrialBalance::generate(session.chart(), session.ledger(),
+                                                trialbalance::ClosingEntries::Exclude);
 }
 
 void executeIncomeStatement(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
@@ -185,6 +192,15 @@ void executeLoad(const ParsedCommand& pc, LedgerSession& session, std::ostream& 
     out << "Loaded LedgerCore session from \"" << pc.path << "\".\n";
 }
 
+void executeClose(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
+    const domain::Account& retainedEarnings = resolvePostingAccount(session, pc.retainedEarningsCode);
+    const std::chrono::system_clock::time_point cutoff = parseDate(pc.asOf);
+    const closing::ClosingResult result =
+        closing::closeTemporaryAccounts(session.chart(), session.ledger(), retainedEarnings.id(), cutoff);
+    out << "posted closing entry #" << result.postingId.value() << " into " << retainedEarnings.code().value()
+        << " as of " << pc.asOf << " (net income " << result.netIncome.toString() << ")\n";
+}
+
 void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out) {
     switch (pc.kind) {
         case CommandKind::AccountCreateRoot:
@@ -228,6 +244,9 @@ void execute(const ParsedCommand& pc, LedgerSession& session, std::ostream& out)
             return;
         case CommandKind::Load:
             executeLoad(pc, session, out);
+            return;
+        case CommandKind::Close:
+            executeClose(pc, session, out);
             return;
         case CommandKind::Exit:
             return;
@@ -285,7 +304,7 @@ int runRepl(LedgerSession& session) {
     std::cout << "LedgerCore CLI -- in-memory session; state is lost when this process exits unless you 'save' it "
                   "first.\n";
     std::cout << "Commands: account, post, trial-balance, balance-sheet, income-statement, formula, computed, "
-                  "save, load.\n";
+                  "close, save, load.\n";
     std::cout << "Type 'exit' or 'quit' to leave, or send EOF (Ctrl-D).\n";
 
     std::string line;

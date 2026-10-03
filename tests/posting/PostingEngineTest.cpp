@@ -46,6 +46,7 @@ using ledgercore::domain::DuplicateAccountCodeException;
 using ledgercore::domain::ForeignAccountException;
 using ledgercore::domain::InvalidAccountException;
 using ledgercore::posting::addChildAccount;
+using ledgercore::posting::InvalidClosingEntryException;
 using ledgercore::posting::InvalidPostingTargetException;
 using ledgercore::posting::post;
 using ledgercore::posting::PostedAccountCannotBecomeGroupException;
@@ -806,4 +807,92 @@ TEST(PostingEngineTest, AddChildAccountDefersEmptyNameValidationToDomain) {
     EXPECT_THROW(addChildAccount(chart, ledger, receivables, AccountCode("1210"), ""), InvalidAccountException);
     EXPECT_TRUE(receivables.isLeaf());
     EXPECT_FALSE(chart.contains(AccountCode("1210")));
+}
+
+// ---------------------------------------------------------------------
+// Closing-kind entries: shape validated before commit
+// ---------------------------------------------------------------------
+
+namespace {
+
+struct ClosingChart {
+    ChartOfAccounts chart;
+    AccountId cash{0};
+    AccountId sales{0};
+    AccountId retained{0};
+    AccountId capital{0};
+    ClosingChart() {
+        cash = chart.addRootAccount(AccountCode("1000"), "Cash", AccountType::Asset).id();
+        capital = chart.addRootAccount(AccountCode("3000"), "Capital", AccountType::Equity).id();
+        retained = chart.addRootAccount(AccountCode("3100"), "Retained", AccountType::Equity).id();
+        sales = chart.addRootAccount(AccountCode("4000"), "Sales", AccountType::Revenue).id();
+    }
+};
+
+} // namespace
+
+TEST(PostingEngineTest, ValidClosingEntryPostsAndKeepsItsKind) {
+    Currency usd("USD");
+    ClosingChart c;
+    Ledger ledger(usd);
+    post(JournalEntry::create(testDate(), "Sale",
+                              {JournalEntryLine::debit(c.cash, Money::fromMajorUnits(10, 0, usd)),
+                               JournalEntryLine::credit(c.sales, Money::fromMajorUnits(10, 0, usd))}),
+         c.chart, ledger);
+
+    post(JournalEntry::createClosing(testDate(), "Close",
+                                     {JournalEntryLine::debit(c.sales, Money::fromMajorUnits(10, 0, usd)),
+                                      JournalEntryLine::credit(c.retained, Money::fromMajorUnits(10, 0, usd))}),
+         c.chart, ledger);
+
+    EXPECT_TRUE(ledger.postedEntries().back().entry().isClosing());
+    EXPECT_TRUE(ledger.balance(c.sales).isZero());
+    EXPECT_EQ(ledger.balance(c.retained), Money::fromMajorUnits(10, 0, usd));
+}
+
+TEST(PostingEngineTest, ClosingEntryTouchingAnAssetIsRejectedWithoutMutation) {
+    // The Closing marker excludes an entry from income statements, so it
+    // must never be allowed to hide an ordinary asset movement.
+    Currency usd("USD");
+    ClosingChart c;
+    Ledger ledger(usd);
+
+    EXPECT_THROW(post(JournalEntry::createClosing(
+                          testDate(), "Not a close",
+                          {JournalEntryLine::debit(c.cash, Money::fromMajorUnits(10, 0, usd)),
+                           JournalEntryLine::credit(c.sales, Money::fromMajorUnits(10, 0, usd))}),
+                      c.chart, ledger),
+                 InvalidClosingEntryException);
+    EXPECT_TRUE(ledger.postedEntries().empty());
+    EXPECT_TRUE(ledger.balance(c.cash).isZero());
+    EXPECT_TRUE(ledger.balance(c.sales).isZero());
+}
+
+TEST(PostingEngineTest, ClosingEntryWithNoTemporaryAccountIsRejected) {
+    Currency usd("USD");
+    ClosingChart c;
+    Ledger ledger(usd);
+
+    EXPECT_THROW(post(JournalEntry::createClosing(
+                          testDate(), "Equity shuffle",
+                          {JournalEntryLine::debit(c.capital, Money::fromMajorUnits(10, 0, usd)),
+                           JournalEntryLine::credit(c.retained, Money::fromMajorUnits(10, 0, usd))}),
+                      c.chart, ledger),
+                 InvalidClosingEntryException);
+    EXPECT_TRUE(ledger.postedEntries().empty());
+}
+
+TEST(PostingEngineTest, ClosingEntryInAnotherCurrencyIsRejected) {
+    Currency usd("USD");
+    Currency eur("EUR");
+    ClosingChart c;
+    Ledger ledger(usd);
+
+    EXPECT_THROW(post(JournalEntry::createClosing(
+                          testDate(), "Close",
+                          {JournalEntryLine::debit(c.sales, Money::fromMajorUnits(10, 0, eur)),
+                           JournalEntryLine::credit(c.retained, Money::fromMajorUnits(10, 0, eur))}),
+                      c.chart, ledger),
+                 LedgerCurrencyMismatchException);
+    EXPECT_TRUE(ledger.postedEntries().empty());
 }

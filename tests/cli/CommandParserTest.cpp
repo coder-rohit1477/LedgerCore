@@ -208,3 +208,24 @@ TEST(CommandParserTest, LoadWithUnknownFlagThrows) {
 }
 
 } // namespace
+
+TEST(CommandParserTest, ValidCloseCommand) {
+    const auto pc = parseLine("close --retained-earnings 3100 --as-of 2027-01-01");
+    ASSERT_TRUE(pc.has_value());
+    EXPECT_EQ(pc->kind, CommandKind::Close);
+    EXPECT_EQ(pc->retainedEarningsCode, "3100");
+    EXPECT_EQ(pc->asOf, "2027-01-01");
+}
+
+TEST(CommandParserTest, CloseRequiresRetainedEarningsAndAsOf) {
+    EXPECT_THROW(parseLine("close --as-of 2027-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("close --retained-earnings 3100"), CliUsageError);
+    EXPECT_THROW(parseLine("close"), CliUsageError);
+}
+
+TEST(CommandParserTest, CloseRejectsUnknownFlagsAndPositionals) {
+    EXPECT_THROW(parseLine("close --retained-earnings 3100 --as-of 2027-01-01 --from 2026-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("close 3100 --retained-earnings 3100 --as-of 2027-01-01"), CliUsageError);
+    EXPECT_THROW(parseLine("close --retained-earnings 3100 --retained-earnings 3200 --as-of 2027-01-01"),
+                 CliUsageError);
+}

@@ -317,6 +317,18 @@ ParsedCommand parseLoad(const std::vector<std::string>& tokens) {
     return pc;
 }
 
+ParsedCommand parseClose(const std::vector<std::string>& tokens) {
+    RawArgs args = splitRawArgs(tokens, 1);
+    rejectUnknownFlags(args, {"retained-earnings", "as-of"});
+    rejectPositionals(args);
+
+    ParsedCommand pc;
+    pc.kind = CommandKind::Close;
+    pc.retainedEarningsCode = requireSingle(args, "retained-earnings");
+    pc.asOf = requireSingle(args, "as-of");
+    return pc;
+}
+
 } // namespace
 
 std::vector<std::string> tokenizeLine(const std::string& line) {
@@ -394,6 +406,9 @@ std::optional<ParsedCommand> parseLine(const std::string& line) {
     }
     if (verb == "load") {
         return parseLoad(tokens);
+    }
+    if (verb == "close") {
+        return parseClose(tokens);
     }
 
     throw CliUsageError("unknown command: '" + verb + "'");

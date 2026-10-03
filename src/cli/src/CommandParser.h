@@ -35,6 +35,7 @@ enum class CommandKind {
     ComputedEval,
     Save,
     Load,
+    Close,
     Exit
 };
 
@@ -80,6 +81,9 @@ struct ParsedCommand {
 
     // save / load
     std::string path;
+
+    // close
+    std::string retainedEarningsCode;
 };
 
 // Splits one input line into tokens on whitespace, with basic

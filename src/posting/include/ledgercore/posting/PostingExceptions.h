@@ -22,6 +22,17 @@ public:
     explicit InvalidPostingTargetException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown by post() for a JournalEntryKind::Closing entry whose lines do
+// not have the shape of a closing entry: every line must target a Revenue,
+// Expense, or Equity account, and at least one must target a temporary
+// (Revenue/Expense) account. This keeps the Closing marker -- which
+// income statements use to exclude an entry from activity -- from ever
+// hiding an ordinary Asset/Liability movement.
+class InvalidClosingEntryException : public ledgercore::LedgerException {
+public:
+    explicit InvalidClosingEntryException(const std::string& message) : LedgerException(message) {}
+};
+
 // Thrown by posting::addChildAccount() when the would-be parent already
 // has posting history in the Ledger: giving it a child would turn a
 // posted leaf into a group account, which can no longer be a posting

@@ -49,7 +49,11 @@ struct LoadedSession {
 };
 
 // Writes a complete, deterministic snapshot of chart/ledger/computedAccounts
-// to path: chart accounts (by AccountCode, parent-before-child, mirroring
+// to path. The header is "LEDGERCORE-SNAPSHOT v1" unless the ledger contains
+// a closing entry (domain::JournalEntryKind::Closing), which is written as a
+// CLOSING record -- same layout as ENTRY -- under a "v2" header; snapshots
+// without closing entries are therefore byte-identical to earlier builds'.
+// Contents: chart accounts (by AccountCode, parent-before-child, mirroring
 // the tree), ledger.postedEntries() in their exact original order (never
 // re-sorted), and computedAccounts.definitions() in insertion order.
 // Ledger cached balances, TrialBalance/BalanceSheet/IncomeStatement,
@@ -80,6 +84,10 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
 // account identity; AccountId is never read from the file -- each journal
 // line's AccountCode is resolved through the freshly-reconstructed chart to
 // obtain the AccountId posting::post() actually needs.
+//
+// Accepts format v1 and v2; a CLOSING record is only valid in v2 and is
+// replayed through domain::JournalEntry::createClosing() and
+// posting::post(), exactly like ENTRY.
 //
 // Throws PersistenceVersionException if the file declares an unsupported
 // format version, PersistenceFormatException for any structural problem

@@ -441,3 +441,112 @@ TEST(CliEndToEndTest, BalanceSheetAsOfShowsNetIncomeOnlyUpToCutoff) {
     EXPECT_NE(result.output.find("530.00 USD", total), std::string::npos);
     EXPECT_EQ(result.output.find("100.00 USD"), std::string::npos);
 }
+
+// ---------------------------------------------------------------------
+// Phase 17: close
+// ---------------------------------------------------------------------
+
+namespace {
+
+const char* const kYearOneScript =
+    "account create-root --code 1000 --name Cash --type asset\n"
+    "account create-root --code 3000 --name Capital --type equity\n"
+    "account create-root --code 3100 --name RetainedEarnings --type equity\n"
+    "account create-root --code 4000 --name Sales --type revenue\n"
+    "account create-root --code 5000 --name Rent --type expense\n"
+    "post --date 2026-01-01 --description invest --debit 1000:1000.00 --credit 3000:1000.00\n"
+    "post --date 2026-03-01 --description sale --debit 1000:700.00 --credit 4000:700.00\n"
+    "post --date 2026-06-01 --description rent --debit 5000:250.00 --credit 1000:250.00\n";
+
+std::string lineContaining(const std::string& out, const std::string& needle, std::size_t from = 0) {
+    const std::size_t pos = out.find(needle, from);
+    if (pos == std::string::npos) {
+        return "";
+    }
+    const std::size_t start = out.rfind('\n', pos) == std::string::npos ? 0 : out.rfind('\n', pos) + 1;
+    return out.substr(start, out.find('\n', pos) - start);
+}
+
+} // namespace
+
+TEST(CliEndToEndTest, CloseMovesNetIncomeIntoRetainedEarningsWithoutErasingTheIncomeStatement) {
+    const RunResult result = runScript(std::string(kYearOneScript)
+                                       + "close --retained-earnings 3100 --as-of 2027-01-01\n"
+                                         "trial-balance\n"
+                                         "balance-sheet\n"
+                                         "income-statement --from 2026-01-01 --to 2027-01-01\n");
+
+    ASSERT_EQ(result.exitCode, 0) << result.output;
+    const std::string& out = result.output;
+    EXPECT_NE(out.find("posted closing entry #4 into 3100 as of 2027-01-01 (net income 450.00 USD)"),
+              std::string::npos)
+        << out;
+
+    // Post-closing trial balance: temporary accounts zero, retained earnings 450.
+    const std::size_t tb = out.find("Trial Balance (USD)");
+    ASSERT_NE(tb, std::string::npos);
+    EXPECT_NE(lineContaining(out, "RetainedEarnings", tb).find("450.00 USD"), std::string::npos);
+    EXPECT_NE(lineContaining(out, "4000      Sales", tb).find("0.00 USD          0.00 USD"), std::string::npos);
+
+    // Balance sheet: retained earnings in equity, nothing left unclosed, still balanced.
+    const std::size_t bs = out.find("Balance Sheet (USD)");
+    ASSERT_NE(bs, std::string::npos);
+    EXPECT_NE(lineContaining(out, "Net Income (unclosed)", bs).find("0.00 USD"), std::string::npos);
+    EXPECT_NE(lineContaining(out, "Liabilities + Equity + Net Income", bs).find("1450.00 USD"), std::string::npos);
+
+    // The closed year's income statement still reports its result.
+    const std::size_t is = out.find("Income Statement (USD)");
+    ASSERT_NE(is, std::string::npos);
+    EXPECT_NE(lineContaining(out, "Net Income", is).find("450.00 USD"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, ClosingTheSameDateTwiceFailsWithAccountingErrorCode) {
+    const RunResult result = runScript(std::string(kYearOneScript)
+                                       + "close --retained-earnings 3100 --as-of 2027-01-01\n"
+                                         "close --retained-earnings 3100 --as-of 2027-01-01\n");
+
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_NE(result.output.find("posted closing entry #4"), std::string::npos);
+    EXPECT_NE(result.output.find("No Revenue or Expense account has a non-zero balance to close"),
+              std::string::npos);
+    EXPECT_EQ(result.output.find("posted closing entry #5"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, CloseIntoNonEquityOrUnknownAccountIsRejected) {
+    const RunResult asset =
+        runScript(std::string(kYearOneScript) + "close --retained-earnings 1000 --as-of 2027-01-01\n");
+    EXPECT_EQ(asset.exitCode, 2);
+    EXPECT_NE(asset.output.find("must be an Equity account"), std::string::npos);
+
+    const RunResult unknown =
+        runScript(std::string(kYearOneScript) + "close --retained-earnings 9999 --as-of 2027-01-01\n");
+    EXPECT_EQ(unknown.exitCode, 2);
+    EXPECT_NE(unknown.output.find("No account found"), std::string::npos);
+
+    const RunResult badDate =
+        runScript(std::string(kYearOneScript) + "close --retained-earnings 3100 --as-of 2026-02-31\n");
+    EXPECT_EQ(badDate.exitCode, 1);
+}
+
+TEST(CliEndToEndTest, ClosedSessionSavesAsV2AndReloadsWithSameReports) {
+    const std::string snapshotPath = uniqueTempPath("closed_snapshot");
+    const RunResult result = runRepl(std::string(kYearOneScript)
+                                     + "close --retained-earnings 3100 --as-of 2027-01-01\n"
+                                       "save " + snapshotPath + "\n"
+                                       "load " + snapshotPath + "\n"
+                                       "income-statement --from 2026-01-01 --to 2027-01-01\n"
+                                       "trial-balance\n"
+                                       "exit\n");
+    std::ifstream snapshot(snapshotPath);
+    std::string header;
+    std::getline(snapshot, header);
+    std::remove(snapshotPath.c_str());
+
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_EQ(header, "LEDGERCORE-SNAPSHOT v2");
+    EXPECT_EQ(result.output.find("error:"), std::string::npos) << result.output;
+    const std::size_t is = result.output.find("Income Statement (USD)");
+    ASSERT_NE(is, std::string::npos);
+    EXPECT_NE(lineContaining(result.output, "Net Income", is).find("450.00 USD"), std::string::npos);
+    EXPECT_NE(lineContaining(result.output, "RetainedEarnings", is).find("450.00 USD"), std::string::npos);
+}

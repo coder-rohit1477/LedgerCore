@@ -11,17 +11,32 @@ JournalEntry::JournalEntry(std::chrono::system_clock::time_point date,
                             std::vector<JournalEntryLine> lines,
                             Currency currency,
                             Money totalDebits,
-                            Money totalCredits)
+                            Money totalCredits,
+                            JournalEntryKind kind)
     : date_(date),
       description_(std::move(description)),
       lines_(std::move(lines)),
       currency_(std::move(currency)),
       totalDebits_(std::move(totalDebits)),
-      totalCredits_(std::move(totalCredits)) {}
+      totalCredits_(std::move(totalCredits)),
+      kind_(kind) {}
 
 JournalEntry JournalEntry::create(std::chrono::system_clock::time_point date,
                                    std::string description,
                                    std::vector<JournalEntryLine> lines) {
+    return createValidated(date, std::move(description), std::move(lines), JournalEntryKind::Standard);
+}
+
+JournalEntry JournalEntry::createClosing(std::chrono::system_clock::time_point date,
+                                          std::string description,
+                                          std::vector<JournalEntryLine> lines) {
+    return createValidated(date, std::move(description), std::move(lines), JournalEntryKind::Closing);
+}
+
+JournalEntry JournalEntry::createValidated(std::chrono::system_clock::time_point date,
+                                            std::string description,
+                                            std::vector<JournalEntryLine> lines,
+                                            JournalEntryKind kind) {
     if (lines.size() < 2) {
         throw InvalidJournalEntryException("JournalEntry requires at least two lines");
     }
@@ -53,7 +68,7 @@ JournalEntry JournalEntry::create(std::chrono::system_clock::time_point date,
             + totalCredits.toString());
     }
 
-    return JournalEntry(date, std::move(description), std::move(lines), currency, totalDebits, totalCredits);
+    return JournalEntry(date, std::move(description), std::move(lines), currency, totalDebits, totalCredits, kind);
 }
 
 } // namespace ledgercore::domain

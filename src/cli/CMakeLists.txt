@@ -18,12 +18,13 @@ set_target_properties(ledgercore_cli PROPERTIES OUTPUT_NAME ledgercore)
 # ledgercore_persistence already PUBLIC-links both, listing them again
 # here would only cause the linker to see each duplicated on the link
 # line ("ignoring duplicate libraries"), exactly as domain/ledger/formula/
-# trialbalance already would if listed directly. persistence and
-# reporting remain direct links because nothing else in this list
-# re-exports either of them.
+# trialbalance already would if listed directly. persistence,
+# reporting, and closing remain direct links because nothing else in this
+# list re-exports any of them.
 target_link_libraries(ledgercore_cli
     PRIVATE
         ledgercore_persistence
         ledgercore_reporting
+        ledgercore_closing
         ledgercore_warnings
 )

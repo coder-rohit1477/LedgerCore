@@ -55,6 +55,21 @@ private:
     domain::Money credit_;
 };
 
+// Whether a TrialBalance counts JournalEntryKind::Closing entries.
+//
+// Include (the default everywhere): every posted entry counts, so after a
+// closing entry Revenue/Expense balances are zero and retained earnings
+// holds the closed result -- the post-closing view a trial balance or
+// balance sheet needs.
+//
+// Exclude: closing entries are skipped, leaving only operating activity
+// -- the view an income statement needs, so closing a period never
+// erases that period's revenue and expenses from its income statement.
+enum class ClosingEntries {
+    Include,
+    Exclude
+};
+
 // An immutable, disconnected snapshot of a ChartOfAccounts + Ledger pair:
 // one TrialBalanceLine per leaf/posting account (including zero-balance
 // ones), ordered by ascending AccountCode, plus the totals of the debit
@@ -80,7 +95,12 @@ public:
     // Throws UnbalancedTrialBalanceException if the resulting totals do
     // not balance -- see that exception's documentation for when this is
     // actually reachable.
-    static TrialBalance generate(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger);
+    //
+    // With ClosingEntries::Exclude, balances are instead replayed from
+    // ledger.postedEntries() skipping closing entries (the Ledger's cached
+    // balances always include them).
+    static TrialBalance generate(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
+                                 ClosingEntries closingEntries = ClosingEntries::Include);
 
     // Same account universe and presentation rules as generate() (every
     // leaf account, including zero-activity ones, ordered by ascending
@@ -95,7 +115,8 @@ public:
     // Throws UnbalancedTrialBalanceException under the same
     // circumstances as generate().
     static TrialBalance generateAsOf(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
-                                      std::chrono::system_clock::time_point cutoff);
+                                      std::chrono::system_clock::time_point cutoff,
+                                      ClosingEntries closingEntries = ClosingEntries::Include);
 
     // Same as generateAsOf(), but includes a posted entry when
     // period.contains(entry.date()) rather than a single cutoff --
@@ -105,7 +126,8 @@ public:
     // Throws UnbalancedTrialBalanceException under the same
     // circumstances as generate().
     static TrialBalance generateForPeriod(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
-                                           const domain::Period& period);
+                                           const domain::Period& period,
+                                           ClosingEntries closingEntries = ClosingEntries::Include);
 
     const domain::Currency& currency() const noexcept { return currency_; }
     const std::vector<TrialBalanceLine>& lines() const noexcept { return lines_; }

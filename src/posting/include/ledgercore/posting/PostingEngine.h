@@ -23,6 +23,10 @@ namespace ledgercore::posting {
 // compute every affected account's new balance into a local temporary
 // (aggregating duplicate AccountId lines first, via domain::signedEffect()),
 // then commit -- so a JournalEntry is never partially posted.
+//
+// A JournalEntryKind::Closing entry is additionally validated (before any
+// mutation) to touch only Revenue, Expense, and Equity accounts, with at
+// least one Revenue/Expense line; otherwise InvalidClosingEntryException.
 ledger::PostingId post(const domain::JournalEntry& entry,
                         const domain::ChartOfAccounts& chart,
                         ledger::Ledger& ledger);

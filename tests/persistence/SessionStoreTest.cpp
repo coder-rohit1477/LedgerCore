@@ -1228,6 +1228,163 @@ TEST(SessionStoreTest, LoadRejectsPersistedDatesOutsideSupportedRange) {
 }
 
 // ---------------------------------------------------------------------
+// Closing entries: CLOSING records, format v1/v2 (Phase 17)
+// ---------------------------------------------------------------------
+
+namespace {
+
+// Standard chart plus a Retained Earnings account (3100); one sale and
+// one expense in year 1, closed as of day(365).
+void setUpClosedYear(ChartOfAccounts& chart, Ledger& ledger) {
+    const Currency usd("USD");
+    StandardAccounts accounts = setUpStandardChart(chart);
+    const AccountId retained = chart.addRootAccount(AccountCode("3100"), "Retained Earnings", AccountType::Equity).id();
+    post(JournalEntry::create(day(10), "Sale",
+                               {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(500, 0, usd)),
+                                JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(500, 0, usd))}),
+         chart, ledger);
+    post(JournalEntry::create(day(20), "Supplies",
+                               {JournalEntryLine::debit(accounts.expense, Money::fromMajorUnits(120, 0, usd)),
+                                JournalEntryLine::credit(accounts.cash, Money::fromMajorUnits(120, 0, usd))}),
+         chart, ledger);
+    post(JournalEntry::createClosing(day(364), "Closing entry",
+                                     {JournalEntryLine::debit(accounts.revenue, Money::fromMajorUnits(500, 0, usd)),
+                                      JournalEntryLine::credit(accounts.expense, Money::fromMajorUnits(120, 0, usd)),
+                                      JournalEntryLine::credit(retained, Money::fromMajorUnits(380, 0, usd))}),
+         chart, ledger);
+}
+
+} // namespace
+
+TEST(SessionStoreTest, SnapshotWithoutClosingEntriesIsStillWrittenAsV1) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    post(JournalEntry::create(day(1), "Sale",
+                               {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(1, 0, usd)),
+                                JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(1, 0, usd))}),
+         chart, ledger);
+
+    const ScopedTempFile file(uniqueTempPath("still_v1"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    const std::string content = readRawFile(file.path());
+    EXPECT_EQ(content.rfind("LEDGERCORE-SNAPSHOT v1\n", 0), 0u);
+    EXPECT_EQ(content.find("CLOSING"), std::string::npos);
+}
+
+TEST(SessionStoreTest, ClosingEntryIsWrittenAsClosingRecordUnderV2Header) {
+    ChartOfAccounts chart;
+    Ledger ledger(Currency("USD"));
+    ComputedAccountRegistry registry;
+    setUpClosedYear(chart, ledger);
+
+    const ScopedTempFile file(uniqueTempPath("v2_closing"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    const std::string content = readRawFile(file.path());
+    EXPECT_EQ(content.rfind("LEDGERCORE-SNAPSHOT v2\n", 0), 0u);
+    EXPECT_NE(content.find("\nCLOSING " + std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                               day(364).time_since_epoch())
+                                                               .count())
+                           + " \"Closing entry\"\n  DEBIT 4000 50000\n  CREDIT 5000 12000\n  CREDIT 3100 38000\n"),
+              std::string::npos)
+        << content;
+    // Ordinary entries keep their ENTRY records.
+    EXPECT_NE(content.find("\nENTRY "), std::string::npos);
+}
+
+TEST(SessionStoreTest, ClosingEntryRoundTripsWithKindBalancesAndReports) {
+    ChartOfAccounts chart;
+    Ledger ledger(Currency("USD"));
+    ComputedAccountRegistry registry;
+    setUpClosedYear(chart, ledger);
+
+    const ScopedTempFile file(uniqueTempPath("closing_round_trip"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+
+    ASSERT_EQ(loaded.ledger->postedEntries().size(), 3u);
+    EXPECT_FALSE(loaded.ledger->postedEntries()[0].entry().isClosing());
+    EXPECT_FALSE(loaded.ledger->postedEntries()[1].entry().isClosing());
+    EXPECT_TRUE(loaded.ledger->postedEntries()[2].entry().isClosing());
+    EXPECT_EQ(loaded.ledger->postedEntries()[2].entry().date(), day(364));
+    const Account* retained = loaded.chart->findByCode(AccountCode("3100"));
+    const Account* revenue = loaded.chart->findByCode(AccountCode("4000"));
+    ASSERT_NE(retained, nullptr);
+    ASSERT_NE(revenue, nullptr);
+    EXPECT_EQ(loaded.ledger->balance(retained->id()), Money::fromMajorUnits(380, 0, Currency("USD")));
+    EXPECT_TRUE(loaded.ledger->balance(revenue->id()).isZero());
+
+    // The income statement excluding closing entries is identical live and reloaded.
+    using ledgercore::trialbalance::ClosingEntries;
+    const Period year(day(0), day(365));
+    EXPECT_EQ(IncomeStatement::generate(TrialBalance::generateForPeriod(chart, ledger, year, ClosingEntries::Exclude))
+                  .netIncome(),
+              IncomeStatement::generate(TrialBalance::generateForPeriod(*loaded.chart, *loaded.ledger, year,
+                                                                        ClosingEntries::Exclude))
+                  .netIncome());
+}
+
+TEST(SessionStoreTest, SaveLoadSaveWithClosingEntryIsByteIdentical) {
+    ChartOfAccounts chart;
+    Ledger ledger(Currency("USD"));
+    ComputedAccountRegistry registry;
+    setUpClosedYear(chart, ledger);
+
+    const ScopedTempFile firstFile(uniqueTempPath("closing_first"));
+    const ScopedTempFile secondFile(uniqueTempPath("closing_second"));
+    ledgercore::persistence::save(chart, ledger, registry, firstFile.path());
+    LoadedSession loaded = ledgercore::persistence::load(firstFile.path());
+    ledgercore::persistence::save(*loaded.chart, *loaded.ledger, *loaded.computedAccounts, secondFile.path());
+
+    EXPECT_EQ(readRawFile(firstFile.path()), readRawFile(secondFile.path()));
+}
+
+TEST(SessionStoreTest, ClosingRecordInV1SnapshotIsRejected) {
+    const ScopedTempFile file(uniqueTempPath("closing_in_v1"));
+    writeRawFile(file.path(), validHeaderAndCurrency()
+                                  + "ACCOUNT ROOT 3100 Equity \"Retained\"\n"
+                                    "ACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+                                    "CLOSING 1767225600000000000 \"Close\"\n"
+                                    "  DEBIT 4000 100\n"
+                                    "  CREDIT 3100 100\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), PersistenceFormatException);
+}
+
+TEST(SessionStoreTest, V2SnapshotIsAcceptedAndUnknownVersionStillRejected) {
+    const ScopedTempFile file(uniqueTempPath("v2_header"));
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\nACCOUNT ROOT 1000 Asset \"Cash\"\n");
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    EXPECT_NE(loaded.chart->findByCode(AccountCode("1000")), nullptr);
+
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v3\nCURRENCY USD\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), PersistenceVersionException);
+}
+
+TEST(SessionStoreTest, HandCraftedClosingRecordTouchingAnAssetIsRejectedOnReplay) {
+    const ScopedTempFile file(uniqueTempPath("bad_closing"));
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\n"
+                              "ACCOUNT ROOT 1000 Asset \"Cash\"\n"
+                              "ACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+                              "CLOSING 1767225600000000000 \"Not a close\"\n"
+                              "  DEBIT 1000 100\n"
+                              "  CREDIT 4000 100\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::posting::InvalidClosingEntryException);
+}
+
+TEST(SessionStoreTest, ClosingRecordDateOutsideSupportedRangeIsRejected) {
+    const ScopedTempFile file(uniqueTempPath("closing_date_range"));
+    writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\n"
+                              "ACCOUNT ROOT 3100 Equity \"Retained\"\n"
+                              "ACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+                              "CLOSING 7258118400000000000 \"Close\"\n"
+                              "  DEBIT 4000 100\n"
+                              "  CREDIT 3100 100\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), PersistenceFormatException);
+}
+
+// ---------------------------------------------------------------------
 // Property-style tests
 // ---------------------------------------------------------------------
 
