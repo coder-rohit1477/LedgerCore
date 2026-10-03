@@ -428,6 +428,35 @@ TEST(JournalEntryTest, CreateClosingProducesClosingEntryWithSameContent) {
     EXPECT_EQ(entry.totalDebits(), Money::fromMajorUnits(5, 0, usd));
 }
 
+TEST(JournalEntryTest, ClosingCutoffIsDatePlusOneMicrosecond) {
+    Currency usd("USD");
+    const auto date = std::chrono::system_clock::time_point{} + std::chrono::hours(24 * 364);
+    const JournalEntry closing = JournalEntry::createClosing(
+        date, "Close",
+        {JournalEntryLine::debit(AccountId(4), Money::fromMajorUnits(5, 0, usd)),
+         JournalEntryLine::credit(AccountId(3), Money::fromMajorUnits(5, 0, usd))});
+    EXPECT_EQ(closing.closingCutoff(), date + std::chrono::microseconds(1));
+    EXPECT_EQ(ledgercore::domain::kClosingCutoffOffset, std::chrono::microseconds(1));
+}
+
+TEST(JournalEntryTest, StandardEntryHasNoClosingCutoff) {
+    Currency usd("USD");
+    const JournalEntry entry = JournalEntry::create(
+        testDate(), "Sale",
+        {JournalEntryLine::debit(AccountId(1), Money::fromMajorUnits(5, 0, usd)),
+         JournalEntryLine::credit(AccountId(2), Money::fromMajorUnits(5, 0, usd))});
+    EXPECT_THROW(entry.closingCutoff(), InvalidJournalEntryException);
+}
+
+TEST(JournalEntryTest, CreateClosingRejectsADateWhoseCutoffIsUnrepresentable) {
+    Currency usd("USD");
+    EXPECT_THROW(JournalEntry::createClosing(std::chrono::system_clock::time_point::max(), "Close",
+                                             {JournalEntryLine::debit(AccountId(4), Money::fromMajorUnits(5, 0, usd)),
+                                              JournalEntryLine::credit(AccountId(3),
+                                                                       Money::fromMajorUnits(5, 0, usd))}),
+                 InvalidJournalEntryException);
+}
+
 TEST(JournalEntryTest, CreateClosingAppliesTheSameValidationAsCreate) {
     Currency usd("USD");
     EXPECT_THROW(JournalEntry::createClosing(testDate(), "Close",

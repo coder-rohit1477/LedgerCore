@@ -1373,6 +1373,94 @@ TEST(SessionStoreTest, HandCraftedClosingRecordTouchingAnAssetIsRejectedOnReplay
     EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::posting::InvalidClosingEntryException);
 }
 
+namespace {
+
+// v2 snapshot: Cash, Capital, Retained (3100), Other Equity (3200), Sales,
+// Rent; Capital 1000 invested and Sales 100 earned in year 1. `closing`
+// is appended verbatim (a CLOSING record dated day 364).
+std::string openYearSnapshotWith(const std::string& closingLines) {
+    const auto nanos = [](int dayNumber) {
+        return std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(day(dayNumber).time_since_epoch())
+                                  .count());
+    };
+    return "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\n"
+           "ACCOUNT ROOT 1000 Asset \"Cash\"\n"
+           "ACCOUNT ROOT 2000 Liability \"Payable\"\n"
+           "ACCOUNT ROOT 3000 Equity \"Capital\"\n"
+           "ACCOUNT ROOT 3100 Equity \"Retained\"\n"
+           "ACCOUNT ROOT 3200 Equity \"Other Equity\"\n"
+           "ACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+           "ACCOUNT ROOT 5000 Expense \"Rent\"\n"
+           "ENTRY " + nanos(1) + " \"Invest\"\n  DEBIT 1000 100000\n  CREDIT 3000 100000\n"
+           "ENTRY " + nanos(10) + " \"Sale\"\n  DEBIT 1000 10000\n  CREDIT 4000 10000\n"
+           "CLOSING " + nanos(364) + " \"Close\"\n" + closingLines;
+}
+
+} // namespace
+
+TEST(SessionStoreTest, HandEditedClosingRecordsThatAreNotCompleteClosesAreRejected) {
+    const std::vector<std::pair<std::string, std::string>> malformed = {
+        {"arbitrary equity transfer riding along",
+         "  DEBIT 4000 10000\n  CREDIT 3100 10000\n  DEBIT 3000 90000\n  CREDIT 3200 90000\n"},
+        {"split across two equity accounts", "  DEBIT 4000 10000\n  CREDIT 3100 4000\n  CREDIT 3200 6000\n"},
+        {"partial close", "  DEBIT 4000 3000\n  CREDIT 3100 3000\n"},
+        {"reversed, hiding revenue", "  DEBIT 3100 50000\n  CREDIT 4000 50000\n"},
+        {"leaves another temporary account non-zero", "  DEBIT 4000 10000\n  CREDIT 5000 10000\n"},
+        {"touches a liability", "  DEBIT 4000 10000\n  CREDIT 2000 10000\n"},
+        {"touches an asset", "  DEBIT 4000 10000\n  CREDIT 1000 10000\n"},
+        {"repeats an account", "  DEBIT 4000 6000\n  DEBIT 4000 4000\n  CREDIT 3100 10000\n"},
+    };
+    for (const auto& [label, lines] : malformed) {
+        const ScopedTempFile file(uniqueTempPath("malformed_closing"));
+        writeRawFile(file.path(), openYearSnapshotWith(lines));
+        EXPECT_THROW(ledgercore::persistence::load(file.path()), ledgercore::posting::InvalidClosingEntryException)
+            << label;
+    }
+}
+
+TEST(SessionStoreTest, HandWrittenCompleteClosingRecordLoadsLikeTheClosingApi) {
+    const ScopedTempFile file(uniqueTempPath("valid_hand_closing"));
+    writeRawFile(file.path(), openYearSnapshotWith("  DEBIT 4000 10000\n  CREDIT 3200 10000\n"));
+
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+
+    ASSERT_EQ(loaded.ledger->postedEntries().size(), 3u);
+    EXPECT_TRUE(loaded.ledger->postedEntries().back().entry().isClosing());
+    EXPECT_TRUE(loaded.ledger->balance(loaded.chart->findByCode(AccountCode("4000"))->id()).isZero());
+    EXPECT_EQ(loaded.ledger->balance(loaded.chart->findByCode(AccountCode("3200"))->id()),
+              Money::fromMajorUnits(100, 0, Currency("USD")));
+}
+
+TEST(SessionStoreTest, ClosingEntryTimestampIsPersistedIdenticallyOnEveryPlatform) {
+    // Closing as of day(365) dates the entry exactly 1us (1000ns) earlier:
+    // representable by every supported clock, so the bytes never depend on
+    // the platform's system_clock resolution.
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    const AccountId retained = chart.addRootAccount(AccountCode("3100"), "Retained", AccountType::Equity).id();
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    post(JournalEntry::create(day(10), "Sale",
+                               {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(5, 0, usd)),
+                                JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(5, 0, usd))}),
+         chart, ledger);
+    post(JournalEntry::createClosing(day(365) - ledgercore::domain::kClosingCutoffOffset, "Closing entry",
+                                     {JournalEntryLine::debit(accounts.revenue, Money::fromMajorUnits(5, 0, usd)),
+                                      JournalEntryLine::credit(retained, Money::fromMajorUnits(5, 0, usd))}),
+         chart, ledger);
+
+    const ScopedTempFile file(uniqueTempPath("closing_timestamp"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    const std::int64_t cutoffNanos =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(day(365).time_since_epoch()).count();
+    EXPECT_NE(readRawFile(file.path()).find("\nCLOSING " + std::to_string(cutoffNanos - 1000) + " "),
+              std::string::npos);
+
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    EXPECT_EQ(loaded.ledger->postedEntries().back().entry().closingCutoff(), day(365));
+}
+
 TEST(SessionStoreTest, ClosingRecordDateOutsideSupportedRangeIsRejected) {
     const ScopedTempFile file(uniqueTempPath("closing_date_range"));
     writeRawFile(file.path(), "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\n"

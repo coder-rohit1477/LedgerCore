@@ -24,9 +24,20 @@ namespace ledgercore::posting {
 // (aggregating duplicate AccountId lines first, via domain::signedEffect()),
 // then commit -- so a JournalEntry is never partially posted.
 //
-// A JournalEntryKind::Closing entry is additionally validated (before any
-// mutation) to touch only Revenue, Expense, and Equity accounts, with at
-// least one Revenue/Expense line; otherwise InvalidClosingEntryException.
+// A JournalEntryKind::Closing entry is excluded from income statements, so
+// it is additionally validated, before any mutation, to be exactly a
+// complete closing entry; otherwise InvalidClosingEntryException:
+//   - every line targets a Revenue, Expense, or Equity account, and at
+//     least one targets a Revenue/Expense account;
+//   - no account appears on more than one line;
+//   - at most one line targets an Equity account (the retained-earnings
+//     destination; none only when revenue and expenses offset exactly);
+//   - with the entry applied, every Revenue/Expense account in chart has a
+//     zero balance counting all posted entries dated before
+//     entry.closingCutoff().
+// These leave no freedom beyond the choice of Equity account, so a
+// Closing entry -- posted live or replayed from a snapshot -- is always
+// one closing::closeTemporaryAccounts() could have produced.
 ledger::PostingId post(const domain::JournalEntry& entry,
                         const domain::ChartOfAccounts& chart,
                         ledger::Ledger& ledger);

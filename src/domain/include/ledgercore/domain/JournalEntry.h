@@ -18,13 +18,24 @@ namespace ledgercore::domain {
 //           genuine balanced posting -- trial balances and balance sheets
 //           include it like any other entry -- but it is not revenue or
 //           expense *activity*, so income statements can exclude it (see
-//           trialbalance::ClosingEntries). posting::post() enforces that a
-//           Closing entry touches only Revenue, Expense, and Equity
-//           accounts, so the marker can never hide ordinary activity.
+//           trialbalance::ClosingEntries). Because of that exclusion,
+//           posting::post() only accepts a Closing entry that is exactly a
+//           complete close as of its closingCutoff() (see PostingEngine.h),
+//           so the marker can never hide or reshape ordinary activity.
 enum class JournalEntryKind {
     Standard,
     Closing
 };
+
+// A Closing entry dated D closes all Revenue/Expense activity dated
+// strictly before D + kClosingCutoffOffset -- its closingCutoff().
+// Equivalently, closing as of cutoff C dates the entry at
+// C - kClosingCutoffOffset. One microsecond is exactly representable by
+// every supported system_clock (microseconds on macOS, nanoseconds on
+// Linux, 100ns ticks on Windows) and by the snapshot format's nanosecond
+// timestamps, so the same close produces the same date -- and the same
+// snapshot bytes -- on every platform.
+inline constexpr std::chrono::microseconds kClosingCutoffOffset{1};
 
 // An immutable, internally-balanced double-entry transaction: a date, a
 // required description, and a fixed set of lines.
@@ -57,8 +68,11 @@ public:
                                 std::vector<JournalEntryLine> lines);
 
     // Identical validation to create(), but the entry's kind() is
-    // JournalEntryKind::Closing. Normally produced by
-    // closing::closeTemporaryAccounts() rather than called directly.
+    // JournalEntryKind::Closing; additionally throws
+    // InvalidJournalEntryException if date is so close to the end of
+    // system_clock's range that closingCutoff() would not be
+    // representable. Normally produced by closing::closeTemporaryAccounts()
+    // rather than called directly.
     static JournalEntry createClosing(std::chrono::system_clock::time_point date,
                                        std::string description,
                                        std::vector<JournalEntryLine> lines);
@@ -73,6 +87,12 @@ public:
 
     JournalEntryKind kind() const noexcept { return kind_; }
     bool isClosing() const noexcept { return kind_ == JournalEntryKind::Closing; }
+
+    // date() + kClosingCutoffOffset: the instant before which this
+    // Closing entry closes all Revenue/Expense activity. Throws
+    // InvalidJournalEntryException for a Standard entry, which closes
+    // nothing.
+    std::chrono::system_clock::time_point closingCutoff() const;
 
 private:
     static JournalEntry createValidated(std::chrono::system_clock::time_point date,

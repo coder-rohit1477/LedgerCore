@@ -7,6 +7,7 @@
 #include "ledgercore/closing/ClosingExceptions.h"
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountType.h"
+#include "ledgercore/domain/DomainExceptions.h"
 #include "ledgercore/domain/JournalEntry.h"
 #include "ledgercore/domain/JournalEntryLine.h"
 #include "ledgercore/posting/PostingEngine.h"
@@ -82,10 +83,13 @@ ClosingResult closeTemporaryAccounts(const domain::ChartOfAccounts& chart, ledge
         lines.push_back(domain::JournalEntryLine::debit(retainedEarnings, -netIncome));
     }
 
-    // A non-zero temporary balance means some entry is dated before
-    // cutoff, so cutoff is not system_clock's minimum and this cannot
-    // underflow.
-    const std::chrono::system_clock::time_point closingDate = cutoff - std::chrono::system_clock::duration(1);
+    // Dated so that the entry's own closingCutoff() is exactly cutoff:
+    // posting::post() then verifies completeness against precisely the
+    // entries closed here (all dated before cutoff).
+    if (cutoff < std::chrono::system_clock::time_point::min() + domain::kClosingCutoffOffset) {
+        throw domain::InvalidJournalEntryException("Closing cutoff is too early to date a closing entry");
+    }
+    const std::chrono::system_clock::time_point closingDate = cutoff - domain::kClosingCutoffOffset;
 
     const domain::JournalEntry entry =
         domain::JournalEntry::createClosing(closingDate, std::move(description), std::move(lines));

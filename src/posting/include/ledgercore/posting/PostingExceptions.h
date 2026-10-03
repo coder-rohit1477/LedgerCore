@@ -22,12 +22,13 @@ public:
     explicit InvalidPostingTargetException(const std::string& message) : LedgerException(message) {}
 };
 
-// Thrown by post() for a JournalEntryKind::Closing entry whose lines do
-// not have the shape of a closing entry: every line must target a Revenue,
-// Expense, or Equity account, and at least one must target a temporary
-// (Revenue/Expense) account. This keeps the Closing marker -- which
-// income statements use to exclude an entry from activity -- from ever
-// hiding an ordinary Asset/Liability movement.
+// Thrown by post() for a JournalEntryKind::Closing entry that is not
+// exactly a complete closing entry (see post() for the precise rules):
+// wrong account types, a repeated account, more than one Equity
+// destination, or a Revenue/Expense balance left non-zero as of the
+// entry's closing cutoff. This keeps the Closing marker -- which income
+// statements use to exclude an entry from activity -- from ever hiding
+// or reshaping ordinary activity.
 class InvalidClosingEntryException : public ledgercore::LedgerException {
 public:
     explicit InvalidClosingEntryException(const std::string& message) : LedgerException(message) {}

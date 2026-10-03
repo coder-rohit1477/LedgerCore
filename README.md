@@ -199,11 +199,11 @@ This single conversion pair (`isDebitNormal` / `signedEffect` / `debitCreditPres
 Sales 700 Cr, Rent 250 Dr  ──close──►  Dr Sales 700 · Cr Rent 250 · Cr Retained Earnings 450
 ```
 
-The closing entry is dated one clock tick before `cutoff`, so afterwards `generateAsOf(cutoff)` is a post-closing trial balance (temporary accounts zero, retained earnings holding the result), while anything dated at or after `cutoff` belongs to the next period.
+The closing entry is dated one microsecond before `cutoff` (`domain::kClosingCutoffOffset` — exactly representable on every supported platform, so the same close is persisted identically everywhere), so afterwards `generateAsOf(cutoff)` is a post-closing trial balance (temporary accounts zero, retained earnings holding the result), while anything dated at or after `cutoff` belongs to the next period.
 
 - **Reports.** Trial balances and balance sheets include closing entries (post-closing view). Income statements exclude them (`trialbalance::ClosingEntries::Exclude`), so a closed year's income statement still reports its revenue, expenses, and net income.
 - **Repeated closing.** A second close with the same cutoff finds every temporary balance already zero and throws `NothingToCloseException`; nothing is posted. If backdated activity is posted into an already-closed range, closing that cutoff again closes exactly the residual. There is no separate "period closed" state, and nothing prevents posting into a closed range.
-- **Guard rail.** `posting::post` rejects a closing-kind entry that touches anything other than Revenue, Expense, and Equity accounts, so the closing marker can never hide ordinary activity — for entries closed live or replayed from a snapshot.
+- **Guard rail.** Because income statements exclude closing entries, `posting::post` accepts a closing-kind entry only if it is exactly a complete close: Revenue/Expense/Equity accounts only, each account at most once, at most one Equity destination, and every Revenue/Expense balance brought to zero as of the entry's cutoff (its date + 1µs). Partial, reversed, split, or padded "closing" entries are rejected — whether posted live or replayed from a hand-edited snapshot — so the marker can never hide or reshape ordinary activity.
 
 ## 6. Period Semantics
 
@@ -265,19 +265,19 @@ The Formula Engine has no knowledge of `ComputedAccountRegistry`, `ChartOfAccoun
 
 ## 8. Testing
 
-**593 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
+**611 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
 
 | Module | Tests |
 |---|---|
-| domain (Account, ChartOfAccounts, Money, JournalEntry, NormalBalance, Period) | 124 |
+| domain (Account, ChartOfAccounts, Money, JournalEntry, NormalBalance, Period) | 127 |
 | ledger | 6 |
-| posting | 33 |
+| posting | 44 |
 | formula (Lexer, Rational, Parser, Evaluator) | 112 |
 | computed | 38 |
 | trialbalance | 52 |
 | reporting | 30 |
-| closing | 35 |
-| persistence | 62 |
+| closing | 36 |
+| persistence | 65 |
 | cli (input parsing, command parsing, session, process-level end-to-end) | 100 |
 | smoke | 1 |
 
@@ -421,7 +421,7 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, snapshot persistence, and the `ledgercore` CLI.
 
-- 593 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
+- 611 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 

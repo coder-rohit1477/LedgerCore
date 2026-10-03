@@ -28,10 +28,13 @@ struct ClosingResult {
 // Scope: all temporary activity dated strictly before cutoff -- exactly
 // the balances TrialBalance::generateAsOf(chart, ledger, cutoff) shows
 // (prior closing entries included, so already-closed results are not
-// closed again). The closing entry is dated one system_clock tick before
-// cutoff, the last instant of the closed range, so afterwards
+// closed again). The closing entry is dated
+// cutoff - domain::kClosingCutoffOffset (one microsecond, identical on
+// every platform), so its closingCutoff() is exactly cutoff and afterwards
 // generateAsOf(..., cutoff) is a post-closing trial balance: every
 // Revenue/Expense balance is zero and retainedEarnings holds the result.
+// posting::post() independently re-verifies that the entry is a complete
+// close as of that cutoff.
 //
 // Lines, in ascending AccountCode order (TrialBalance's order): each
 // temporary account with a non-zero balance gets one line on the

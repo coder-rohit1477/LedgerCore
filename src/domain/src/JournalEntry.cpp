@@ -1,10 +1,15 @@
 #include "ledgercore/domain/JournalEntry.h"
 
+#include <chrono>
+#include <ratio>
 #include <utility>
 
 #include "ledgercore/domain/DomainExceptions.h"
 
 namespace ledgercore::domain {
+
+static_assert(std::ratio_less_equal<std::chrono::system_clock::period, std::micro>::value,
+              "kClosingCutoffOffset (1us) must be exactly representable by system_clock");
 
 JournalEntry::JournalEntry(std::chrono::system_clock::time_point date,
                             std::string description,
@@ -30,7 +35,17 @@ JournalEntry JournalEntry::create(std::chrono::system_clock::time_point date,
 JournalEntry JournalEntry::createClosing(std::chrono::system_clock::time_point date,
                                           std::string description,
                                           std::vector<JournalEntryLine> lines) {
+    if (date > std::chrono::system_clock::time_point::max() - kClosingCutoffOffset) {
+        throw InvalidJournalEntryException("Closing entry date is too late for its cutoff to be representable");
+    }
     return createValidated(date, std::move(description), std::move(lines), JournalEntryKind::Closing);
+}
+
+std::chrono::system_clock::time_point JournalEntry::closingCutoff() const {
+    if (!isClosing()) {
+        throw InvalidJournalEntryException("Only a closing entry has a closing cutoff");
+    }
+    return date_ + kClosingCutoffOffset;
 }
 
 JournalEntry JournalEntry::createValidated(std::chrono::system_clock::time_point date,

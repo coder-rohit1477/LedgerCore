@@ -556,11 +556,23 @@ TEST(ClosingEngineTest, OnlyActivityBeforeTheCutoffIsClosed) {
     EXPECT_EQ(books.balance(books.retained), usd(300));
 }
 
-TEST(ClosingEngineTest, ClosingEntryIsDatedOneTickBeforeTheCutoff) {
+TEST(ClosingEngineTest, ClosingEntryIsDatedOneMicrosecondBeforeTheCutoffOnEveryPlatform) {
     Books books;
     books.earn(day(100), books.sales, 300);
     books.close(kYearEnd);
-    EXPECT_EQ(lastPosted(books.ledger).entry().date(), kYearEnd - std::chrono::system_clock::duration(1));
+    const JournalEntry& entry = lastPosted(books.ledger).entry();
+    EXPECT_EQ(entry.date(), kYearEnd - std::chrono::microseconds(1));
+    EXPECT_EQ(entry.closingCutoff(), kYearEnd);
+}
+
+TEST(ClosingEngineTest, ActivityInTheFinalMicrosecondBeforeTheCutoffIsClosed) {
+    // The closing entry's own date (cutoff - 1us) is inside the closed
+    // range, and so is anything dated at or after it but before cutoff.
+    Books books;
+    books.earn(kYearEnd - std::chrono::microseconds(1), books.sales, 25);
+    const ClosingResult result = books.close(kYearEnd);
+    EXPECT_EQ(result.netIncome, usd(25));
+    EXPECT_TRUE(books.balance(books.sales).isZero());
 }
 
 TEST(ClosingEngineTest, AsOfCutoffBecomesAPostClosingTrialBalance) {

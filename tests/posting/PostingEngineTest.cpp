@@ -815,19 +815,58 @@ TEST(PostingEngineTest, AddChildAccountDefersEmptyNameValidationToDomain) {
 
 namespace {
 
+std::chrono::system_clock::time_point day(int n) {
+    return std::chrono::system_clock::time_point{} + std::chrono::hours(24 * n);
+}
+
 struct ClosingChart {
     ChartOfAccounts chart;
     AccountId cash{0};
     AccountId sales{0};
     AccountId retained{0};
     AccountId capital{0};
+    AccountId otherEquity{0};
+    AccountId rent{0};
     ClosingChart() {
         cash = chart.addRootAccount(AccountCode("1000"), "Cash", AccountType::Asset).id();
         capital = chart.addRootAccount(AccountCode("3000"), "Capital", AccountType::Equity).id();
         retained = chart.addRootAccount(AccountCode("3100"), "Retained", AccountType::Equity).id();
+        otherEquity = chart.addRootAccount(AccountCode("3200"), "Other Equity", AccountType::Equity).id();
         sales = chart.addRootAccount(AccountCode("4000"), "Sales", AccountType::Revenue).id();
+        rent = chart.addRootAccount(AccountCode("5000"), "Rent", AccountType::Expense).id();
     }
 };
+
+// ClosingChart with Capital 1000 invested on day 1 and Sales 100 earned on
+// day 10 -- one open temporary balance (Sales, credit 100) to close.
+struct OpenYear : ClosingChart {
+    Currency usd{"USD"};
+    Ledger ledger{Currency("USD")};
+    OpenYear() {
+        postStandard(day(1), cash, capital, 1000);
+        postStandard(day(10), cash, sales, 100);
+    }
+    void postStandard(std::chrono::system_clock::time_point date, AccountId debit, AccountId credit,
+                      std::int64_t major) {
+        post(JournalEntry::create(date, "Activity",
+                                  {JournalEntryLine::debit(debit, Money::fromMajorUnits(major, 0, usd)),
+                                   JournalEntryLine::credit(credit, Money::fromMajorUnits(major, 0, usd))}),
+             chart, ledger);
+    }
+    JournalEntryLine dr(AccountId id, std::int64_t major) const {
+        return JournalEntryLine::debit(id, Money::fromMajorUnits(major, 0, usd));
+    }
+    JournalEntryLine cr(AccountId id, std::int64_t major) const {
+        return JournalEntryLine::credit(id, Money::fromMajorUnits(major, 0, usd));
+    }
+    // Posts a closing-kind entry dated day(364) (cutoff day(364) + 1us).
+    void postClosing(std::vector<JournalEntryLine> lines) {
+        post(JournalEntry::createClosing(day(364), "Close", std::move(lines)), chart, ledger);
+    }
+    std::size_t historySize() const { return ledger.postedEntries().size(); }
+};
+
+
 
 } // namespace
 
@@ -895,4 +934,95 @@ TEST(PostingEngineTest, ClosingEntryInAnotherCurrencyIsRejected) {
                       c.chart, ledger),
                  LedgerCurrencyMismatchException);
     EXPECT_TRUE(ledger.postedEntries().empty());
+}
+
+// The audit's malformed-but-balanced "closing" entries. Each must be
+// rejected before commit, leaving balances and history untouched.
+
+TEST(PostingEngineTest, ClosingEntryWithTwoEquityDestinationsIsRejected) {
+    OpenYear y;
+    EXPECT_THROW(y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 40), y.cr(y.otherEquity, 60)}),
+                 InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 2u);
+    EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(100, 0, y.usd));
+    EXPECT_TRUE(y.ledger.balance(y.retained).isZero());
+}
+
+TEST(PostingEngineTest, ClosingEntryCarryingAnEquityToEquityTransferIsRejected) {
+    OpenYear y;
+    EXPECT_THROW(
+        y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100), y.dr(y.capital, 900), y.cr(y.otherEquity, 900)}),
+        InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 2u);
+    EXPECT_EQ(y.ledger.balance(y.capital), Money::fromMajorUnits(1000, 0, y.usd));
+}
+
+TEST(PostingEngineTest, PartialClosingEntryIsRejected) {
+    OpenYear y;
+    EXPECT_THROW(y.postClosing({y.dr(y.sales, 30), y.cr(y.retained, 30)}), InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 2u);
+    EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(100, 0, y.usd));
+}
+
+TEST(PostingEngineTest, ReversedClosingEntryHidingRevenueIsRejected) {
+    OpenYear y;
+    EXPECT_THROW(y.postClosing({y.dr(y.retained, 500), y.cr(y.sales, 500)}), InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 2u);
+    EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(100, 0, y.usd));
+}
+
+TEST(PostingEngineTest, ClosingEntryThatLeavesAnotherTemporaryAccountNonZeroIsRejected) {
+    // Dr Sales 100 / Cr Rent 100 zeroes Sales but drives Rent (which had no
+    // balance) to a 100 credit balance that income statements would never see.
+    OpenYear y;
+    EXPECT_THROW(y.postClosing({y.dr(y.sales, 100), y.cr(y.rent, 100)}), InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 2u);
+    EXPECT_TRUE(y.ledger.balance(y.rent).isZero());
+}
+
+TEST(PostingEngineTest, ClosingEntryThatSkipsAnOpenTemporaryAccountIsRejected) {
+    OpenYear y;
+    y.postStandard(day(20), y.rent, y.cash, 30);  // Rent now has a debit balance too
+    EXPECT_THROW(y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100)}), InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 3u);
+}
+
+TEST(PostingEngineTest, ClosingEntryRepeatingAnAccountIsRejected) {
+    OpenYear y;
+    EXPECT_THROW(y.postClosing({y.dr(y.sales, 60), y.dr(y.sales, 40), y.cr(y.retained, 100)}),
+                 InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 2u);
+}
+
+TEST(PostingEngineTest, CompleteClosingIntoAnyEquityAccountIsAccepted) {
+    // Which Equity account receives the result is the caller's choice;
+    // closing::closeTemporaryAccounts() accepts any leaf Equity target too.
+    OpenYear y;
+    y.postClosing({y.dr(y.sales, 100), y.cr(y.otherEquity, 100)});
+    EXPECT_TRUE(y.ledger.balance(y.sales).isZero());
+    EXPECT_EQ(y.ledger.balance(y.otherEquity), Money::fromMajorUnits(100, 0, y.usd));
+}
+
+TEST(PostingEngineTest, OffsettingClosingWithoutEquityLineIsAcceptedOnlyWhenComplete) {
+    OpenYear y;
+    y.postStandard(day(20), y.rent, y.cash, 100);  // revenue 100, expense 100
+    y.postClosing({y.dr(y.sales, 100), y.cr(y.rent, 100)});
+    EXPECT_TRUE(y.ledger.balance(y.sales).isZero());
+    EXPECT_TRUE(y.ledger.balance(y.rent).isZero());
+    EXPECT_TRUE(y.ledger.balance(y.retained).isZero());
+}
+
+TEST(PostingEngineTest, ClosingCompletenessIgnoresActivityAtOrAfterTheCutoff) {
+    OpenYear y;
+    y.postStandard(day(400), y.cash, y.sales, 70);  // next period, posted first
+    y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100)});
+    EXPECT_EQ(y.ledger.balance(y.sales), Money::fromMajorUnits(70, 0, y.usd));
+    EXPECT_EQ(y.ledger.balance(y.retained), Money::fromMajorUnits(100, 0, y.usd));
+}
+
+TEST(PostingEngineTest, SecondClosingEntryForAnAlreadyClosedCutoffIsRejected) {
+    OpenYear y;
+    y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100)});
+    EXPECT_THROW(y.postClosing({y.dr(y.sales, 100), y.cr(y.retained, 100)}), InvalidClosingEntryException);
+    EXPECT_EQ(y.historySize(), 3u);
 }
