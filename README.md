@@ -229,6 +229,18 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+To run the full suite under AddressSanitizer and UndefinedBehaviorSanitizer (GCC/Clang only; off by default, so normal builds are unaffected), use a separate build directory:
+
+```sh
+cmake -S . -B build-sanitize -DLEDGERCORE_SANITIZE=ON
+cmake --build build-sanitize
+ctest --test-dir build-sanitize --output-on-failure
+```
+
+Any UB report aborts the offending test process, so it surfaces as a CTest failure.
+
+Journal entry dates are supported from 1900-01-01 up to (not including) 2200-01-01 UTC — the range the snapshot format's nanosecond timestamps can represent with margin. The CLI and persistence reject dates outside it rather than clamping them.
+
 ## 10. Project Structure
 
 ```

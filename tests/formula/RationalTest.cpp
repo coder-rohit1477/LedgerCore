@@ -162,6 +162,72 @@ TEST(RationalTest, CrossMultiplicationOverflowInAdditionThrows) {
 }
 
 // ---------------------------------------------------------------------
+// Sign normalization at the std::int64_t::min() boundary
+//
+// A negative denominator (produced only by dividing by a negative value)
+// is normalized by negating both parts; when either part is exactly
+// std::int64_t::min() that negation is unrepresentable and must throw
+// rather than invoke signed-overflow UB. These run under UBSan via the
+// LEDGERCORE_SANITIZE build (see README), which would abort on any
+// regression.
+// ---------------------------------------------------------------------
+
+TEST(RationalTest, DivisionProducingInt64MinDenominatorThrows) {
+    // 1 / min() reaches normalization as (1, min()).
+    const Rational minValue = Rational::ofInt(std::numeric_limits<std::int64_t>::min());
+    EXPECT_THROW(Rational::ofInt(1) / minValue, FormulaEvaluationException);
+}
+
+TEST(RationalTest, DivisionProducingInt64MinNumeratorWithNegativeDenominatorThrows) {
+    // min() / -1 reaches normalization as (min(), -1).
+    const Rational minValue = Rational::ofInt(std::numeric_limits<std::int64_t>::min());
+    EXPECT_THROW(minValue / Rational::ofInt(-1), FormulaEvaluationException);
+}
+
+TEST(RationalTest, DivisionOfNegativeFractionByInt64MinThrows) {
+    // (-1/2) / min(): lhs.denominator * rhs.numerator == 2 * min() is
+    // caught by the multiplication overflow check; (-1) / min() reaches
+    // normalization as (-1, min()). Both paths must throw, never wrap.
+    const Rational minValue = Rational::ofInt(std::numeric_limits<std::int64_t>::min());
+    EXPECT_THROW((Rational::ofInt(-1) / Rational::ofInt(2)) / minValue, FormulaEvaluationException);
+    EXPECT_THROW(Rational::ofInt(-1) / minValue, FormulaEvaluationException);
+}
+
+TEST(RationalTest, Int64MinNumeratorWithPositiveDenominatorIsStillRepresentable) {
+    // No sign normalization is needed here, so min() itself stays valid.
+    constexpr std::int64_t kInt64Min = std::numeric_limits<std::int64_t>::min();
+    const Rational minValue = Rational::ofInt(kInt64Min);
+
+    const Rational same = minValue / Rational::ofInt(1);
+    EXPECT_EQ(same.numerator(), kInt64Min);
+    EXPECT_EQ(same.denominator(), 1);
+
+    const Rational half = minValue / Rational::ofInt(2);
+    EXPECT_EQ(half.numerator(), kInt64Min / 2);
+    EXPECT_EQ(half.denominator(), 1);
+}
+
+TEST(RationalTest, RepresentableNegativeDenominatorIsNormalizedToPositive) {
+    constexpr std::int64_t kInt64Max = std::numeric_limits<std::int64_t>::max();
+
+    const Rational negativeHalf = Rational::ofInt(1) / Rational::ofInt(-2);
+    EXPECT_EQ(negativeHalf.numerator(), -1);
+    EXPECT_EQ(negativeHalf.denominator(), 2);
+
+    const Rational positiveHalf = Rational::ofInt(-3) / Rational::ofInt(-6);
+    EXPECT_EQ(positiveHalf.numerator(), 1);
+    EXPECT_EQ(positiveHalf.denominator(), 2);
+
+    const Rational negatedMax = Rational::ofInt(kInt64Max) / Rational::ofInt(-1);
+    EXPECT_EQ(negatedMax.numerator(), -kInt64Max);
+    EXPECT_EQ(negatedMax.denominator(), 1);
+
+    const Rational reciprocal = Rational::ofInt(1) / Rational::ofInt(-kInt64Max);
+    EXPECT_EQ(reciprocal.numerator(), -1);
+    EXPECT_EQ(reciprocal.denominator(), kInt64Max);
+}
+
+// ---------------------------------------------------------------------
 // Sign predicates and equality
 // ---------------------------------------------------------------------
 

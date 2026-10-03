@@ -3,6 +3,8 @@
 #include <chrono>
 #include <utility>
 
+#include "ledgercore/domain/JournalEntryLine.h"
+
 namespace ledgercore::ledger {
 
 Ledger::Ledger(domain::Currency currency) : currency_(std::move(currency)) {}
@@ -10,6 +12,17 @@ Ledger::Ledger(domain::Currency currency) : currency_(std::move(currency)) {}
 domain::Money Ledger::balance(domain::AccountId accountId) const {
     auto it = balances_.find(accountId.value());
     return it == balances_.end() ? domain::Money::zero(currency_) : it->second;
+}
+
+bool Ledger::hasPostingHistory(domain::AccountId accountId) const noexcept {
+    for (const PostedJournalEntry& posted : postedEntries_) {
+        for (const domain::JournalEntryLine& line : posted.entry().lines()) {
+            if (line.accountId() == accountId) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 PostingId Ledger::commit(domain::JournalEntry entry,

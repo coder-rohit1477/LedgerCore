@@ -63,6 +63,12 @@ public:
     // from "zero balance".
     domain::Money balance(domain::AccountId accountId) const;
 
+    // Whether any posted JournalEntry has a line referencing accountId.
+    // Answered from postedEntries() -- the authoritative history -- not
+    // from balance(): an account whose postings net to zero still has
+    // history. Linear in the total number of posted lines.
+    bool hasPostingHistory(domain::AccountId accountId) const noexcept;
+
     const std::vector<PostedJournalEntry>& postedEntries() const noexcept { return postedEntries_; }
 
 private:

@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <string>
+#include <type_traits>
+
 #include "ledgercore/domain/Account.h"
 #include "ledgercore/domain/AccountCode.h"
 #include "ledgercore/domain/AccountType.h"
@@ -11,6 +14,15 @@ using ledgercore::domain::AccountCode;
 using ledgercore::domain::AccountType;
 using ledgercore::domain::ChartOfAccounts;
 using ledgercore::domain::InvalidAccountException;
+
+// Account has identity and is owned only by its ChartOfAccounts: none of
+// these may be possible through the public API, since each would let a
+// caller replace or hollow out a chart-owned Account behind the chart's
+// code/id indexes and its children's parent pointers.
+static_assert(!std::is_copy_constructible_v<Account>, "Account must not be copy-constructible");
+static_assert(!std::is_copy_assignable_v<Account>, "Account must not be copy-assignable");
+static_assert(!std::is_move_constructible_v<Account>, "Account must not be move-constructible");
+static_assert(!std::is_move_assignable_v<Account>, "Account must not be move-assignable");
 
 TEST(AccountCodeTest, RejectsEmptyValue) {
     EXPECT_THROW(AccountCode(""), InvalidAccountException);
@@ -87,4 +99,24 @@ TEST(AccountTest, MultipleNestingLevelsPreserveAncestryAndType) {
     ASSERT_NE(cash.parent()->parent(), nullptr);
     EXPECT_EQ(cash.parent()->parent(), &assets);
     EXPECT_EQ(cash.type(), AccountType::Asset);
+}
+
+TEST(AccountTest, ChartOwnedAccountsKeepStableAddressesAndLinkageAcrossGrowth) {
+    ChartOfAccounts chart;
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& cash = chart.addChildAccount(assets, AccountCode("1100"), "Cash");
+
+    // Grow both the top-level list and the child list enough to force
+    // their underlying vectors to reallocate; accounts are held by
+    // unique_ptr, so neither Account is ever relocated or copied.
+    for (int i = 0; i < 64; ++i) {
+        chart.addRootAccount(AccountCode("9" + std::to_string(i)), "Filler", AccountType::Expense);
+        chart.addChildAccount(assets, AccountCode("12" + std::to_string(i)), "Filler child");
+    }
+
+    EXPECT_EQ(chart.findByCode(AccountCode("1000")), &assets);
+    EXPECT_EQ(chart.findByCode(AccountCode("1100")), &cash);
+    EXPECT_EQ(cash.parent(), &assets);
+    EXPECT_EQ(assets.children().front(), &cash);
+    EXPECT_EQ(chart.findById(cash.id()), &cash);
 }

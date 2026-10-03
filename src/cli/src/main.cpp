@@ -64,7 +64,10 @@ void executeAccountCreateChild(const ParsedCommand& pc, LedgerSession& session, 
         throw CliUsageError("no such parent account: '" + pc.parentCode + "'");
     }
     const domain::AccountCode code = parseAccountCode(pc.code);
-    const domain::Account& account = session.chart().addChildAccount(*parent, code, pc.name);
+    // Ledger-aware: rejects a parent that already has posting history,
+    // which plain ChartOfAccounts::addChildAccount() cannot know about.
+    const domain::Account& account =
+        posting::addChildAccount(session.chart(), session.ledger(), *parent, code, pc.name);
     out << "created child account " << account.code().value() << " \"" << account.name() << "\" under "
         << parent->code().value() << "\n";
 }

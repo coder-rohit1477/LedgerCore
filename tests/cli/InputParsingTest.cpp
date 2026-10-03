@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "CommandParser.h"
 #include "ledgercore/domain/AccountType.h"
 #include "ledgercore/domain/Currency.h"
@@ -141,6 +143,36 @@ TEST(InputParsingTest, InvalidDateDayOutOfRangeThrowsCliUsageError) {
 
 TEST(InputParsingTest, InvalidDateEmptyStringThrowsCliUsageError) {
     EXPECT_THROW(parseDate(""), CliUsageError);
+}
+
+// Supported range: 1900-01-01 .. 2199-12-31 (the persistence format's
+// range). Out-of-range dates must be rejected before any time_point
+// conversion -- on a nanosecond system_clock, years past 2262 would
+// otherwise overflow std::int64_t (checked under UBSan).
+TEST(InputParsingTest, MinimumSupportedDateParsesToExpectedInstant) {
+    const auto date = parseDate("1900-01-01");
+    EXPECT_EQ(std::chrono::duration_cast<std::chrono::seconds>(date.time_since_epoch()).count(), -2208988800);
+}
+
+TEST(InputParsingTest, MaximumSupportedDateParsesToExpectedInstant) {
+    const auto date = parseDate("2199-12-31");
+    EXPECT_EQ(std::chrono::duration_cast<std::chrono::seconds>(date.time_since_epoch()).count(),
+              7258118400 - 86400);
+}
+
+TEST(InputParsingTest, DateJustBeforeSupportedRangeThrowsCliUsageError) {
+    EXPECT_THROW(parseDate("1899-12-31"), CliUsageError);
+}
+
+TEST(InputParsingTest, DateJustAfterSupportedRangeThrowsCliUsageError) {
+    EXPECT_THROW(parseDate("2200-01-01"), CliUsageError);
+}
+
+TEST(InputParsingTest, FarOutOfRangeDatesThrowCliUsageError) {
+    EXPECT_THROW(parseDate("2300-01-01"), CliUsageError);
+    EXPECT_THROW(parseDate("9999-12-31"), CliUsageError);
+    EXPECT_THROW(parseDate("0000-01-01"), CliUsageError);
+    EXPECT_THROW(parseDate("1677-01-01"), CliUsageError);
 }
 
 } // namespace

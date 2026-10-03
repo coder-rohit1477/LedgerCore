@@ -29,6 +29,16 @@ namespace ledgercore::domain {
 // Ledger module, which does not exist yet in this phase.
 class Account {
 public:
+    // Account has identity and lives only inside its ChartOfAccounts
+    // (owned via unique_ptr, never by value). Copying or moving one out of
+    // -- or over -- a chart-owned instance would leave the chart's code/id
+    // indexes and children's parent pointers referring to a different or
+    // emptied object, so all four are deleted rather than left implicit.
+    Account(const Account&) = delete;
+    Account& operator=(const Account&) = delete;
+    Account(Account&&) = delete;
+    Account& operator=(Account&&) = delete;
+
     AccountId id() const noexcept { return id_; }
     const AccountCode& code() const noexcept { return code_; }
     const std::string& name() const noexcept { return name_; }

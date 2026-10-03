@@ -76,17 +76,18 @@ bool wouldMultiplyOverflow(std::int64_t a, std::int64_t b) noexcept {
 } // namespace
 
 Rational::Rational(std::int64_t numerator, std::int64_t denominator) {
-    // Every caller in this file guarantees denominator != 0, and that
-    // negating a negative denominator below cannot overflow: the
-    // denominator passed here is always either an existing (already
-    // positive, by this same invariant) Rational's denominator, a
-    // product of two such denominators, or a numerator from an existing
-    // Rational -- and every multiplication that could produce such a
-    // value is overflow-checked (via wouldMultiplyOverflow, which is
-    // conservative about the exact std::int64_t::min() boundary) before
-    // it is performed, so a denominator of std::int64_t::min() can never
-    // reach this constructor.
+    // Every caller in this file guarantees denominator != 0. A negative
+    // denominator (only operator/ can produce one, from a negative
+    // divisor numerator) is normalized by negating both parts -- which is
+    // not representable when either part is std::int64_t::min(). That
+    // case is reachable: wouldMultiplyOverflow() deliberately allows
+    // min() * 1, so e.g. 1 / min() reaches here as (1, min()), and
+    // min() / -1 as (min(), -1). Reject it before negating, exactly as
+    // operator-(const Rational&) already does for a min() numerator.
     if (denominator < 0) {
+        if (numerator == kInt64Min || denominator == kInt64Min) {
+            throw FormulaEvaluationException("Rational sign normalization overflows the representable range");
+        }
         numerator = -numerator;
         denominator = -denominator;
     }

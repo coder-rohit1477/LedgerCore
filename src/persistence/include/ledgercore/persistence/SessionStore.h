@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 
@@ -8,6 +9,23 @@
 #include "ledgercore/ledger/Ledger.h"
 
 namespace ledgercore::persistence {
+
+// The supported range of JournalEntry dates, as whole seconds since the
+// Unix epoch (UTC): [1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z).
+//
+// The snapshot format stores each date as a signed 64-bit count of
+// nanoseconds since the epoch, which can only represent roughly
+// 1677-09-21 .. 2262-04-11; converting a date outside that window
+// overflows std::int64_t (undefined behavior, observed in practice as a
+// silently wrapped, completely different date). The bounds here are
+// deliberately round and well inside that window, and are fixed by this
+// format rather than by the platform's system_clock resolution. save()
+// rejects an out-of-range entry date before converting it, load()
+// rejects an out-of-range ENTRY value before converting it, and the CLI
+// rejects an out-of-range typed date before it ever becomes a
+// time_point -- none of them clamp.
+inline constexpr std::int64_t kMinSupportedDateEpochSeconds = -2208988800;   // 1900-01-01T00:00:00Z
+inline constexpr std::int64_t kEndOfSupportedDatesEpochSeconds = 7258118400; // 2200-01-01T00:00:00Z (exclusive)
 
 // A fully reconstructed, self-contained accounting session, produced only
 // by a load() call that replayed every persisted record successfully.
@@ -45,8 +63,10 @@ struct LoadedSession {
 // (best effort) and leaves any pre-existing file at path untouched, then
 // throws PersistenceException.
 //
-// Throws PersistenceException if an account or computed-account name
-// referenced by an unquoted field (an AccountCode, or a ComputedAccountName)
+// Throws PersistenceException if a posted entry's date is outside the
+// supported range above (any pre-existing file at path is left
+// untouched), if an account or computed-account name referenced by an
+// unquoted field (an AccountCode, or a ComputedAccountName)
 // contains whitespace or a double-quote character, since the file format's
 // grammar cannot represent that without ambiguity, or if a posted line's
 // AccountId cannot be resolved back to an account in chart (chart/ledger
@@ -66,9 +86,12 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
 // (missing/malformed header, wrong field count, malformed integer, unknown
 // record or AccountType token, unterminated quoted string, a truncated
 // file, or an ACCOUNT CHILD record naming a parent AccountCode this file
-// has not already declared), or the relevant existing domain/posting/formula
+// has not already declared, or an ENTRY date outside the supported range
+// above), or the relevant existing domain/posting/formula
 // exception (e.g. domain::DuplicateAccountCodeException,
 // domain::UnbalancedJournalEntryException, posting::AccountNotFoundException,
+// posting::PostedAccountCannotBecomeGroupException (an ACCOUNT CHILD record
+// under an account an earlier ENTRY already posted to),
 // formula::FormulaSyntaxException, domain::InvalidCurrencyException) for a
 // syntactically well-formed record that violates an accounting invariant --
 // persistence never re-validates what those types already validate.

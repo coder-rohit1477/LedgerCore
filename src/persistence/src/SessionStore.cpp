@@ -204,10 +204,33 @@ bool isBlank(const std::string& line) {
 // Date encoding: full-precision, deterministic, not locale-dependent
 // ---------------------------------------------------------------------
 
+// The supported date range (see SessionStore.h) in the file's own unit.
+// Both products are compile-time constants well inside std::int64_t, so
+// computing them cannot overflow (a constexpr overflow would not compile).
+constexpr std::int64_t kNanosPerSecond = 1'000'000'000;
+constexpr std::int64_t kMinSupportedNanos = kMinSupportedDateEpochSeconds * kNanosPerSecond;
+constexpr std::int64_t kEndOfSupportedNanos = kEndOfSupportedDatesEpochSeconds * kNanosPerSecond;
+
+std::chrono::system_clock::time_point timePointFromEpochSeconds(std::int64_t seconds) {
+    return std::chrono::system_clock::time_point{}
+           + std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::seconds(seconds));
+}
+
+// Compares time_points in system_clock's own duration -- no unit
+// conversion of the (possibly far out-of-range) date itself -- so this is
+// safe for every representable time_point.
+bool isSupportedDate(std::chrono::system_clock::time_point tp) {
+    return tp >= timePointFromEpochSeconds(kMinSupportedDateEpochSeconds)
+           && tp < timePointFromEpochSeconds(kEndOfSupportedDatesEpochSeconds);
+}
+
+// Precondition: isSupportedDate(tp), which guarantees the conversion to
+// nanoseconds below cannot overflow.
 std::int64_t nanosSinceEpoch(std::chrono::system_clock::time_point tp) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
 }
 
+// Precondition: kMinSupportedNanos <= nanos < kEndOfSupportedNanos.
 std::chrono::system_clock::time_point timePointFromNanos(std::int64_t nanos) {
     return std::chrono::system_clock::time_point{}
            + std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::nanoseconds(nanos));
@@ -245,6 +268,11 @@ void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, cons
 
     for (const ledger::PostedJournalEntry& posted : ledger.postedEntries()) {
         const domain::JournalEntry& entry = posted.entry();
+        if (!isSupportedDate(entry.date())) {
+            throw PersistenceException("JournalEntry \"" + entry.description()
+                                        + "\" has a date outside the supported range "
+                                          "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)");
+        }
         out << "ENTRY " << nanosSinceEpoch(entry.date()) << ' ' << escapeQuoted(entry.description()) << '\n';
         for (const domain::JournalEntryLine& line : entry.lines()) {
             const domain::Account* account = chart.findById(line.accountId());
@@ -287,7 +315,8 @@ std::vector<std::string> readAllLines(std::istream& in) {
     return lines;
 }
 
-void parseAccountRecord(const std::vector<std::string>& tokens, std::size_t lineNumber, domain::ChartOfAccounts& chart) {
+void parseAccountRecord(const std::vector<std::string>& tokens, std::size_t lineNumber, domain::ChartOfAccounts& chart,
+                        const ledger::Ledger& ledger) {
     if (tokens.size() < 2) {
         throw PersistenceFormatException("malformed ACCOUNT record at line " + std::to_string(lineNumber));
     }
@@ -307,7 +336,11 @@ void parseAccountRecord(const std::vector<std::string>& tokens, std::size_t line
             throw PersistenceFormatException("ACCOUNT CHILD references unknown parent AccountCode '" + tokens[2]
                                               + "' at line " + std::to_string(lineNumber));
         }
-        chart.addChildAccount(*parent, domain::AccountCode(tokens[3]), tokens[4]);
+        // save() always writes every ACCOUNT record before any ENTRY, so a
+        // genuine snapshot never trips this; a hand-edited file that
+        // declares a child under an already-replayed posting target is
+        // rejected exactly as the live CLI would reject it.
+        posting::addChildAccount(chart, ledger, *parent, domain::AccountCode(tokens[3]), tokens[4]);
     } else {
         throw PersistenceFormatException("unknown ACCOUNT kind '" + kind + "' at line " + std::to_string(lineNumber));
     }
@@ -469,12 +502,17 @@ LoadedSession load(const std::filesystem::path& path) {
             const std::string& recordType = tokens[0];
 
             if (recordType == "ACCOUNT") {
-                parseAccountRecord(tokens, lineNumber, *chart);
+                parseAccountRecord(tokens, lineNumber, *chart, *ledgerPtr);
             } else if (recordType == "ENTRY") {
                 if (tokens.size() != 3) {
                     throw PersistenceFormatException("malformed ENTRY record at line " + std::to_string(lineNumber));
                 }
                 const std::int64_t nanos = parseInt64Field(tokens[1], "ENTRY date", lineNumber);
+                if (nanos < kMinSupportedNanos || nanos >= kEndOfSupportedNanos) {
+                    throw PersistenceFormatException("ENTRY date " + tokens[1] + " at line " + std::to_string(lineNumber)
+                                                      + " is outside the supported range "
+                                                        "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)");
+                }
                 const std::chrono::system_clock::time_point date = timePointFromNanos(nanos);
                 const std::string& description = tokens[2];
 

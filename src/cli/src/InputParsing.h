@@ -46,7 +46,10 @@ domain::Money parseAmount(const std::string& text, const domain::Currency& curre
 
 // "YYYY-MM-DD", interpreted as UTC midnight. Throws CliUsageError for any
 // shape that doesn't match (wrong length, non-digit characters, wrong
-// separators, month outside 01-12, day outside 01-31). JournalEntry::date()
+// separators, month outside 01-12, day outside 01-31), or for a date
+// outside the persistence format's supported range, 1900-01-01 through
+// 2199-12-31 (see persistence::kMinSupportedDateEpochSeconds) -- checked
+// before any time_point conversion, never clamped. JournalEntry::date()
 // is a bare std::chrono::system_clock::time_point with no domain-level
 // string parser to defer to, by that type's own documented design.
 std::chrono::system_clock::time_point parseDate(const std::string& text);

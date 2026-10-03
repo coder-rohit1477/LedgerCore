@@ -42,8 +42,12 @@ using ledgercore::ledger::LedgerCurrencyMismatchException;
 using ledgercore::ledger::PostedJournalEntry;
 using ledgercore::ledger::PostingId;
 using ledgercore::posting::AccountNotFoundException;
+using ledgercore::domain::DuplicateAccountCodeException;
+using ledgercore::domain::ForeignAccountException;
+using ledgercore::posting::addChildAccount;
 using ledgercore::posting::InvalidPostingTargetException;
 using ledgercore::posting::post;
+using ledgercore::posting::PostedAccountCannotBecomeGroupException;
 
 namespace {
 std::chrono::system_clock::time_point testDate() {
@@ -624,4 +628,167 @@ TEST(PostingEnginePropertyTest, TrialBalanceTotalsMatchAfterSuccessfulPostings) 
 
     EXPECT_EQ(totalDebits, totalCredits);
     EXPECT_EQ(totalDebits, Money::fromMajorUnits(1300, 0, usd));
+}
+
+// ---------------------------------------------------------------------
+// Ledger-aware child creation (posting::addChildAccount)
+//
+// A posted leaf must never become a group account: TrialBalance would
+// silently drop its history and persistence could no longer replay it.
+// ---------------------------------------------------------------------
+
+namespace {
+
+struct PostedPair {
+    Account* cash;
+    Account* equity;
+};
+
+// Cash (asset) and Capital (equity) roots, with `amount` posted Dr Cash /
+// Cr Capital.
+PostedPair setUpPostedCashAndCapital(ChartOfAccounts& chart, Ledger& ledger, const Money& amount) {
+    Account& cash = chart.addRootAccount(AccountCode("1000"), "Cash", AccountType::Asset);
+    Account& equity = chart.addRootAccount(AccountCode("3000"), "Capital", AccountType::Equity);
+    post(JournalEntry::create(testDate(), "Owner investment",
+                               {
+                                   JournalEntryLine::debit(cash.id(), amount),
+                                   JournalEntryLine::credit(equity.id(), amount),
+                               }),
+         chart, ledger);
+    return PostedPair{&cash, &equity};
+}
+
+} // namespace
+
+TEST(LedgerPostingHistoryTest, HistoryIsTrackedForEveryPostedAccountOnBothSides) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    const AccountId untouched =
+        chart.addRootAccount(AccountCode("5000"), "Unused", AccountType::Expense).id();
+    EXPECT_FALSE(ledger.hasPostingHistory(untouched));
+
+    PostedPair accounts = setUpPostedCashAndCapital(chart, ledger, Money::fromMajorUnits(500, 0, usd));
+
+    EXPECT_TRUE(ledger.hasPostingHistory(accounts.cash->id()));
+    EXPECT_TRUE(ledger.hasPostingHistory(accounts.equity->id()));
+    EXPECT_FALSE(ledger.hasPostingHistory(untouched));
+}
+
+TEST(PostingEngineTest, AddChildAccountRejectsParentWithPostedBalance) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    PostedPair accounts = setUpPostedCashAndCapital(chart, ledger, Money::fromMajorUnits(500, 0, usd));
+
+    EXPECT_THROW(addChildAccount(chart, ledger, *accounts.cash, AccountCode("1010"), "Petty cash"),
+                 PostedAccountCannotBecomeGroupException);
+    EXPECT_TRUE(accounts.cash->isLeaf());
+}
+
+TEST(PostingEngineTest, AddChildAccountRejectsParentWhoseHistoryNetsToZero) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    PostedPair accounts = setUpPostedCashAndCapital(chart, ledger, Money::fromMajorUnits(500, 0, usd));
+    // Reverse the investment: Cash's balance is now exactly zero, but it
+    // still has posting history that must remain replayable.
+    post(JournalEntry::create(testDate(), "Reversal",
+                               {
+                                   JournalEntryLine::debit(accounts.equity->id(), Money::fromMajorUnits(500, 0, usd)),
+                                   JournalEntryLine::credit(accounts.cash->id(), Money::fromMajorUnits(500, 0, usd)),
+                               }),
+         chart, ledger);
+    ASSERT_TRUE(ledger.balance(accounts.cash->id()).isZero());
+
+    EXPECT_THROW(addChildAccount(chart, ledger, *accounts.cash, AccountCode("1010"), "Petty cash"),
+                 PostedAccountCannotBecomeGroupException);
+    EXPECT_TRUE(accounts.cash->isLeaf());
+}
+
+TEST(PostingEngineTest, AddChildAccountAllowsFirstChildUnderUnpostedLeaf) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    setUpPostedCashAndCapital(chart, ledger, Money::fromMajorUnits(500, 0, usd));
+    Account& receivables = chart.addRootAccount(AccountCode("1200"), "Receivables", AccountType::Asset);
+
+    Account& customerA = addChildAccount(chart, ledger, receivables, AccountCode("1210"), "Customer A");
+
+    EXPECT_FALSE(receivables.isLeaf());
+    EXPECT_EQ(customerA.parent(), &receivables);
+    EXPECT_EQ(customerA.type(), AccountType::Asset);
+    EXPECT_EQ(chart.findByCode(AccountCode("1210")), &customerA);
+}
+
+TEST(PostingEngineTest, AddChildAccountAllowsSiblingUnderGroupWhoseChildrenArePosted) {
+    // The group itself was never a posting target (it can't be), so
+    // growing it is safe even though its existing children have history.
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    Account& assets = chart.addRootAccount(AccountCode("1000"), "Assets", AccountType::Asset);
+    Account& cash = chart.addChildAccount(assets, AccountCode("1100"), "Cash");
+    Account& equity = chart.addRootAccount(AccountCode("3000"), "Capital", AccountType::Equity);
+    post(JournalEntry::create(testDate(), "Owner investment",
+                               {
+                                   JournalEntryLine::debit(cash.id(), Money::fromMajorUnits(10, 0, usd)),
+                                   JournalEntryLine::credit(equity.id(), Money::fromMajorUnits(10, 0, usd)),
+                               }),
+         chart, ledger);
+
+    Account& bank = addChildAccount(chart, ledger, assets, AccountCode("1200"), "Bank");
+    EXPECT_EQ(bank.parent(), &assets);
+    EXPECT_EQ(assets.children().size(), 2u);
+}
+
+TEST(PostingEngineTest, RejectedChildCreationLeavesChartAndLedgerUnchanged) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    Ledger ledger(usd);
+    PostedPair accounts = setUpPostedCashAndCapital(chart, ledger, Money::fromMajorUnits(500, 0, usd));
+    const AccountId cashId = accounts.cash->id();
+    const std::size_t historyBefore = ledger.postedEntries().size();
+    const Money cashBefore = ledger.balance(cashId);
+    const Money equityBefore = ledger.balance(accounts.equity->id());
+
+    EXPECT_THROW(addChildAccount(chart, ledger, *accounts.cash, AccountCode("1010"), "Petty cash"),
+                 PostedAccountCannotBecomeGroupException);
+
+    // Chart: no new account, no new child, parent still a leaf root.
+    EXPECT_FALSE(chart.contains(AccountCode("1010")));
+    EXPECT_TRUE(accounts.cash->isLeaf());
+    EXPECT_TRUE(accounts.cash->children().empty());
+    EXPECT_EQ(chart.rootAccounts().size(), 2u);
+    EXPECT_EQ(chart.findById(cashId), accounts.cash);
+    // Ledger: untouched.
+    EXPECT_EQ(ledger.postedEntries().size(), historyBefore);
+    EXPECT_EQ(ledger.balance(cashId), cashBefore);
+    EXPECT_EQ(ledger.balance(accounts.equity->id()), equityBefore);
+    // The account is still a valid posting target afterwards.
+    post(JournalEntry::create(testDate(), "Follow-up",
+                               {
+                                   JournalEntryLine::debit(cashId, Money::fromMajorUnits(1, 0, usd)),
+                                   JournalEntryLine::credit(accounts.equity->id(), Money::fromMajorUnits(1, 0, usd)),
+                               }),
+         chart, ledger);
+    EXPECT_EQ(ledger.balance(cashId), Money::fromMajorUnits(501, 0, usd));
+}
+
+TEST(PostingEngineTest, AddChildAccountStillEnforcesChartLevelRules) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    ChartOfAccounts otherChart;
+    Ledger ledger(usd);
+    setUpPostedCashAndCapital(chart, ledger, Money::fromMajorUnits(500, 0, usd));
+    Account& receivables = chart.addRootAccount(AccountCode("1200"), "Receivables", AccountType::Asset);
+    // Same AccountId value (1) as this chart's posted Cash account, but
+    // foreign: must be rejected as foreign, not judged by this ledger.
+    Account& foreign = otherChart.addRootAccount(AccountCode("9000"), "Foreign", AccountType::Asset);
+    ASSERT_EQ(foreign.id(), chart.findByCode(AccountCode("1000"))->id());
+
+    EXPECT_THROW(addChildAccount(chart, ledger, foreign, AccountCode("9100"), "Child"), ForeignAccountException);
+    EXPECT_THROW(addChildAccount(chart, ledger, receivables, AccountCode("3000"), "Dup"),
+                 DuplicateAccountCodeException);
+    EXPECT_TRUE(receivables.isLeaf());
 }

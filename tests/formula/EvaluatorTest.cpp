@@ -264,6 +264,20 @@ TEST(EvaluatorTest, ScalarDivisionByZeroThrows) {
     EXPECT_THROW(evaluateFormula("1 / 0", resolver), FormulaEvaluationException);
 }
 
+// The two formula-text reproductions from the Phase 13 audit: both build
+// std::int64_t::min() exactly from literals (0 - max - 1) and then divide
+// so that Rational sign normalization would have to negate it. Each must
+// throw, never invoke signed-overflow UB (checked under UBSan).
+TEST(EvaluatorTest, ScalarDivisionByInt64MinThrows) {
+    MapAccountResolver resolver;
+    EXPECT_THROW(evaluateFormula("1 / (0 - 9223372036854775807 - 1)", resolver), FormulaEvaluationException);
+}
+
+TEST(EvaluatorTest, ScalarInt64MinDividedByNegativeOneThrows) {
+    MapAccountResolver resolver;
+    EXPECT_THROW(evaluateFormula("(0 - 9223372036854775807 - 1) / -1", resolver), FormulaEvaluationException);
+}
+
 // ---------------------------------------------------------------------
 // Unary operators
 // ---------------------------------------------------------------------

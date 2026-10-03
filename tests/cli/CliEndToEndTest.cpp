@@ -278,3 +278,74 @@ TEST(CliEndToEndTest, ReplFailedLoadPrintsErrorAndSessionRemainsUsable) {
     EXPECT_NE(result.output.find("1000"), std::string::npos);
     EXPECT_NE(result.output.find("TOTAL"), std::string::npos);
 }
+
+// ---------------------------------------------------------------------
+// Phase 14 regressions
+// ---------------------------------------------------------------------
+
+TEST(CliEndToEndTest, CreateChildUnderPostedAccountExitsWithCodeTwo) {
+    const RunResult result = runScript(
+        "account create-root --code 1000 --name Cash --type asset\n"
+        "account create-root --code 3000 --name Capital --type equity\n"
+        "post --date 2026-01-01 --description \"Owner investment\" --debit 1000:500.00 --credit 3000:500.00\n"
+        "account create-child --parent 1000 --code 1010 --name \"Petty cash\"\n"
+        "trial-balance\n");
+
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_NE(result.output.find("has posting history"), std::string::npos);
+    EXPECT_EQ(result.output.find("created child account"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, ReplRejectedChildUnderPostedAccountKeepsSessionSaveableAndReloadable) {
+    // The exact Phase 13 reproduction: previously create-child succeeded,
+    // trial-balance then failed as unbalanced, and the saved snapshot
+    // could not be reloaded. Now create-child is rejected, and every
+    // later step succeeds against an intact session.
+    const std::string snapshotPath = uniqueTempPath("posted_leaf_snapshot");
+    const RunResult result = runRepl(
+        "account create-root --code 1000 --name Cash --type asset\n"
+        "account create-root --code 3000 --name Capital --type equity\n"
+        "post --date 2026-01-01 --description \"Owner investment\" --debit 1000:500.00 --credit 3000:500.00\n"
+        "account create-child --parent 1000 --code 1010 --name \"Petty cash\"\n"
+        "save " + snapshotPath + "\n"
+        "load " + snapshotPath + "\n"
+        "trial-balance\n"
+        "account show 1000\n"
+        "exit\n");
+    std::remove(snapshotPath.c_str());
+
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_NE(result.output.find("has posting history"), std::string::npos);
+    EXPECT_EQ(result.output.find("created child account"), std::string::npos);
+    EXPECT_NE(result.output.find("Saved LedgerCore session to"), std::string::npos);
+    EXPECT_NE(result.output.find("Loaded LedgerCore session from"), std::string::npos);
+    EXPECT_EQ(result.output.find("does not balance"), std::string::npos);
+    EXPECT_EQ(result.output.find("non-leaf"), std::string::npos);
+    EXPECT_NE(result.output.find("500.00 USD"), std::string::npos);
+    EXPECT_NE(result.output.find("kind:   leaf"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, CreateChildUnderUnpostedAccountStillSucceeds) {
+    const RunResult result = runScript(
+        "account create-root --code 1000 --name Assets --type asset\n"
+        "account create-root --code 3000 --name Capital --type equity\n"
+        "account create-child --parent 1000 --code 1010 --name Cash\n"
+        "post --date 2026-01-01 --description invest --debit 1010:500.00 --credit 3000:500.00\n"
+        "account create-child --parent 1000 --code 1020 --name Bank\n"
+        "trial-balance\n");
+
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_NE(result.output.find("created child account 1020"), std::string::npos);
+    EXPECT_NE(result.output.find("TOTAL"), std::string::npos);
+}
+
+TEST(CliEndToEndTest, PostWithDateOutsideSupportedRangeExitsWithCodeOne) {
+    const RunResult result = runScript(
+        "account create-root --code 1000 --name Cash --type asset\n"
+        "account create-root --code 3000 --name Capital --type equity\n"
+        "post --date 2300-01-01 --description \"Far future\" --debit 1000:1.00 --credit 3000:1.00\n");
+
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_NE(result.output.find("date out of supported range"), std::string::npos);
+    EXPECT_EQ(result.output.find("posted entry"), std::string::npos);
+}

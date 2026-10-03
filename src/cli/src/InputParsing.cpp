@@ -4,6 +4,7 @@
 #include <exception>
 
 #include "CommandParser.h"
+#include "ledgercore/persistence/SessionStore.h"
 
 namespace ledgercore::cli {
 
@@ -157,7 +158,18 @@ std::chrono::system_clock::time_point parseDate(const std::string& text) {
         rejectDate(text);
     }
 
+    // Range-check in whole seconds (days is at most ~3.65 million for a
+    // four-digit year, so this product cannot overflow) *before* building
+    // a time_point: converting days to system_clock::duration overflows
+    // std::int64_t outside ~1677..2262 on platforms whose system_clock
+    // counts nanoseconds. The bound is the persistence format's supported
+    // range, so every date the CLI accepts can also be saved and reloaded.
     const std::int64_t days = daysFromCivil(year, month, day);
+    const std::int64_t epochSeconds = days * 86400;
+    if (epochSeconds < persistence::kMinSupportedDateEpochSeconds
+        || epochSeconds >= persistence::kEndOfSupportedDatesEpochSeconds) {
+        throw CliUsageError("date out of supported range: '" + text + "' (supported: 1900-01-01 to 2199-12-31)");
+    }
     using DaysDuration = std::chrono::duration<std::int64_t, std::ratio<86400>>;
     return std::chrono::system_clock::time_point{}
            + std::chrono::duration_cast<std::chrono::system_clock::duration>(DaysDuration(days));

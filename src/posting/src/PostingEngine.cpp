@@ -72,4 +72,21 @@ ledger::PostingId post(const domain::JournalEntry& entry,
     return ledger.commit(entry, std::move(newBalances));
 }
 
+domain::Account& addChildAccount(domain::ChartOfAccounts& chart,
+                                 const ledger::Ledger& ledger,
+                                 domain::Account& parent,
+                                 domain::AccountCode code,
+                                 std::string name) {
+    // Only consult ledger for an Account that genuinely belongs to chart:
+    // a foreign parent's AccountId is meaningless against this ledger, and
+    // must still be rejected by chart's own ForeignAccountException.
+    const bool belongsToChart = chart.findById(parent.id()) == &parent;
+    if (belongsToChart && ledger.hasPostingHistory(parent.id())) {
+        throw PostedAccountCannotBecomeGroupException(
+            "Cannot add a child to account " + parent.code().value()
+            + ": it has posting history, and a group account cannot be a posting target");
+    }
+    return chart.addChildAccount(parent, std::move(code), std::move(name));
+}
+
 } // namespace ledgercore::posting

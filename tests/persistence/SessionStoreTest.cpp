@@ -63,6 +63,7 @@ using ledgercore::persistence::PersistenceException;
 using ledgercore::persistence::PersistenceFormatException;
 using ledgercore::persistence::PersistenceVersionException;
 using ledgercore::posting::post;
+using ledgercore::posting::PostedAccountCannotBecomeGroupException;
 using ledgercore::reporting::BalanceSheet;
 using ledgercore::reporting::IncomeStatement;
 using ledgercore::trialbalance::TrialBalance;
@@ -981,6 +982,249 @@ TEST(SessionStoreTest, SaveLoadSaveIsByteIdenticalWhenStateIsUnchanged) {
     ledgercore::persistence::save(*loaded.chart, *loaded.ledger, *loaded.computedAccounts, secondFile.path());
 
     EXPECT_EQ(readRawFile(firstFile.path()), readRawFile(secondFile.path()));
+}
+
+// ---------------------------------------------------------------------
+// Posted leaf can never become a group (Phase 14, P0-1)
+// ---------------------------------------------------------------------
+
+TEST(SessionStoreTest, ChildAddedViaLedgerAwarePathAfterUnrelatedPostingsReloads) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    Account& receivables = chart.addRootAccount(AccountCode("1200"), "Receivables", AccountType::Asset);
+
+    post(JournalEntry::create(day(1), "Investment",
+                               {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(500, 0, usd)),
+                                JournalEntryLine::credit(accounts.equity, Money::fromMajorUnits(500, 0, usd))}),
+         chart, ledger);
+    // Receivables was never posted to, so it may still become a group.
+    const AccountId customerA =
+        ledgercore::posting::addChildAccount(chart, ledger, receivables, AccountCode("1210"), "Customer A").id();
+    post(JournalEntry::create(day(2), "Credit sale",
+                               {JournalEntryLine::debit(customerA, Money::fromMajorUnits(75, 0, usd)),
+                                JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(75, 0, usd))}),
+         chart, ledger);
+
+    const ScopedTempFile file(uniqueTempPath("child_after_postings"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+
+    const Account* reloadedReceivables = loaded.chart->findByCode(AccountCode("1200"));
+    ASSERT_NE(reloadedReceivables, nullptr);
+    EXPECT_FALSE(reloadedReceivables->isLeaf());
+    const TrialBalance liveTb = TrialBalance::generate(chart, ledger);
+    const TrialBalance reloadedTb = TrialBalance::generate(*loaded.chart, *loaded.ledger);
+    EXPECT_EQ(liveTb.totalDebits(), reloadedTb.totalDebits());
+    EXPECT_EQ(reloadedTb.totalDebits(), Money::fromMajorUnits(575, 0, usd));
+}
+
+TEST(SessionStoreTest, RejectedChildUnderPostedLeafLeavesSessionSaveableAndReloadable) {
+    // The Phase 13 reproduction, at library level: post to 1000, then try
+    // to give it a child. That attempt is now rejected, so the session
+    // keeps a valid shape and its snapshot reloads (previously: save
+    // succeeded, load failed with "Cannot post to non-leaf account").
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    post(JournalEntry::create(day(1), "Investment",
+                               {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(500, 0, usd)),
+                                JournalEntryLine::credit(accounts.equity, Money::fromMajorUnits(500, 0, usd))}),
+         chart, ledger);
+
+    Account* cash = chart.findByCode(AccountCode("1000"));
+    ASSERT_NE(cash, nullptr);
+    EXPECT_THROW(ledgercore::posting::addChildAccount(chart, ledger, *cash, AccountCode("1010"), "Petty cash"),
+                 PostedAccountCannotBecomeGroupException);
+
+    const ScopedTempFile file(uniqueTempPath("rejected_child"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    EXPECT_EQ(readRawFile(file.path()).find("1010"), std::string::npos);
+
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    const Account* reloadedCash = loaded.chart->findByCode(AccountCode("1000"));
+    ASSERT_NE(reloadedCash, nullptr);
+    EXPECT_TRUE(reloadedCash->isLeaf());
+    const TrialBalance reloadedTb = TrialBalance::generate(*loaded.chart, *loaded.ledger);
+    EXPECT_EQ(reloadedTb.totalDebits(), Money::fromMajorUnits(500, 0, usd));
+    EXPECT_EQ(reloadedTb.totalCredits(), Money::fromMajorUnits(500, 0, usd));
+}
+
+TEST(SessionStoreTest, HandCraftedChildUnderAlreadyPostedAccountIsRejectedOnLoad) {
+    // save() always writes every ACCOUNT before any ENTRY, so only a
+    // hand-edited file can declare a child after its parent was posted
+    // to; load() must reject it rather than build the broken shape.
+    const ScopedTempFile file(uniqueTempPath("child_after_entry"));
+    writeRawFile(file.path(), validHeaderAndCurrency()
+                                  + "ACCOUNT ROOT 1000 Asset \"Cash\"\n"
+                                    "ACCOUNT ROOT 3000 Equity \"Capital\"\n"
+                                    "ENTRY 1767225600000000000 \"Owner investment\"\n"
+                                    "  DEBIT 1000 50000\n"
+                                    "  CREDIT 3000 50000\n"
+                                    "ACCOUNT CHILD 1000 1010 \"Petty cash\"\n");
+    EXPECT_THROW(ledgercore::persistence::load(file.path()), PostedAccountCannotBecomeGroupException);
+}
+
+// ---------------------------------------------------------------------
+// Supported date range (Phase 14, P1-3)
+// ---------------------------------------------------------------------
+
+namespace {
+
+using ledgercore::persistence::kEndOfSupportedDatesEpochSeconds;
+using ledgercore::persistence::kMinSupportedDateEpochSeconds;
+
+std::chrono::system_clock::time_point epochSeconds(std::int64_t seconds) {
+    return std::chrono::system_clock::time_point{}
+           + std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::seconds(seconds));
+}
+
+// First and last representable instants of the supported range on this
+// platform's system_clock (last == one clock tick before the exclusive end).
+std::chrono::system_clock::time_point minSupportedDate() {
+    return epochSeconds(kMinSupportedDateEpochSeconds);
+}
+
+std::chrono::system_clock::time_point maxSupportedDate() {
+    return epochSeconds(kEndOfSupportedDatesEpochSeconds) - std::chrono::system_clock::duration(1);
+}
+
+std::int64_t nanosOf(std::chrono::system_clock::time_point tp) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+}
+
+void postSingleEntryAt(ChartOfAccounts& chart, Ledger& ledger, const StandardAccounts& accounts,
+                       std::chrono::system_clock::time_point date, const std::string& description) {
+    const Currency usd("USD");
+    post(JournalEntry::create(date, description,
+                               {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(1, 0, usd)),
+                                JournalEntryLine::credit(accounts.equity, Money::fromMajorUnits(1, 0, usd))}),
+         chart, ledger);
+}
+
+std::string entryFileWithDate(const std::string& nanosText) {
+    return validHeaderAndCurrency() + "ACCOUNT ROOT 1000 Asset \"Cash\"\n"
+           + "ACCOUNT ROOT 3000 Equity \"Capital\"\n" + "ENTRY " + nanosText + " \"Dated\"\n"
+           + "  DEBIT 1000 100\n  CREDIT 3000 100\n";
+}
+
+} // namespace
+
+TEST(SessionStoreTest, SupportedDateBoundsAreTheDocumentedCalendarInstants) {
+    EXPECT_EQ(kMinSupportedDateEpochSeconds, -2208988800);   // 1900-01-01T00:00:00Z
+    EXPECT_EQ(kEndOfSupportedDatesEpochSeconds, 7258118400); // 2200-01-01T00:00:00Z
+}
+
+TEST(SessionStoreTest, MinimumSupportedDateRoundTripsExactly) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    postSingleEntryAt(chart, ledger, accounts, minSupportedDate(), "First supported instant");
+
+    const ScopedTempFile file(uniqueTempPath("min_date"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    EXPECT_NE(readRawFile(file.path()).find("ENTRY -2208988800000000000 "), std::string::npos);
+
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    ASSERT_EQ(loaded.ledger->postedEntries().size(), 1u);
+    EXPECT_EQ(loaded.ledger->postedEntries().front().entry().date(), minSupportedDate());
+}
+
+TEST(SessionStoreTest, MaximumSupportedDateRoundTripsExactly) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    postSingleEntryAt(chart, ledger, accounts, maxSupportedDate(), "Last supported instant");
+
+    const ScopedTempFile file(uniqueTempPath("max_date"));
+    ledgercore::persistence::save(chart, ledger, registry, file.path());
+    EXPECT_NE(readRawFile(file.path()).find("ENTRY " + std::to_string(nanosOf(maxSupportedDate())) + " "),
+              std::string::npos);
+
+    LoadedSession loaded = ledgercore::persistence::load(file.path());
+    ASSERT_EQ(loaded.ledger->postedEntries().size(), 1u);
+    EXPECT_EQ(loaded.ledger->postedEntries().front().entry().date(), maxSupportedDate());
+}
+
+TEST(SessionStoreTest, BoundaryDatesSaveLoadSaveIsByteIdentical) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    postSingleEntryAt(chart, ledger, accounts, maxSupportedDate(), "Last");
+    postSingleEntryAt(chart, ledger, accounts, minSupportedDate(), "First");
+
+    const ScopedTempFile firstFile(uniqueTempPath("boundary_first"));
+    const ScopedTempFile secondFile(uniqueTempPath("boundary_second"));
+    ledgercore::persistence::save(chart, ledger, registry, firstFile.path());
+    LoadedSession loaded = ledgercore::persistence::load(firstFile.path());
+    ledgercore::persistence::save(*loaded.chart, *loaded.ledger, *loaded.computedAccounts, secondFile.path());
+
+    EXPECT_EQ(readRawFile(firstFile.path()), readRawFile(secondFile.path()));
+}
+
+TEST(SessionStoreTest, SaveRejectsDatesOutsideSupportedRangeAndLeavesTargetUntouched) {
+    const std::vector<std::chrono::system_clock::time_point> outOfRange = {
+        minSupportedDate() - std::chrono::system_clock::duration(1),   // one tick before 1900-01-01
+        epochSeconds(kEndOfSupportedDatesEpochSeconds),               // 2200-01-01 itself (exclusive end)
+        std::chrono::system_clock::time_point::min(),
+        std::chrono::system_clock::time_point::max(),
+    };
+
+    for (const auto& date : outOfRange) {
+        Currency usd("USD");
+        ChartOfAccounts chart;
+        StandardAccounts accounts = setUpStandardChart(chart);
+        Ledger ledger(usd);
+        ComputedAccountRegistry registry;
+
+        const ScopedTempFile file(uniqueTempPath("out_of_range_save"));
+        ledgercore::persistence::save(chart, ledger, registry, file.path());
+        const std::string originalContent = readRawFile(file.path());
+
+        postSingleEntryAt(chart, ledger, accounts, date, "Out of range");
+        EXPECT_THROW(ledgercore::persistence::save(chart, ledger, registry, file.path()), PersistenceException);
+        EXPECT_EQ(readRawFile(file.path()), originalContent);
+        EXPECT_FALSE(std::filesystem::exists(file.path().string() + ".tmp"));
+    }
+}
+
+TEST(SessionStoreTest, LoadAcceptsPersistedDatesAtBothBoundaries) {
+    const ScopedTempFile file(uniqueTempPath("boundary_load"));
+
+    writeRawFile(file.path(), entryFileWithDate("-2208988800000000000"));
+    LoadedSession first = ledgercore::persistence::load(file.path());
+    ASSERT_EQ(first.ledger->postedEntries().size(), 1u);
+    EXPECT_EQ(first.ledger->postedEntries().front().entry().date(), minSupportedDate());
+
+    writeRawFile(file.path(), entryFileWithDate("7258118399999999000"));
+    LoadedSession last = ledgercore::persistence::load(file.path());
+    ASSERT_EQ(last.ledger->postedEntries().size(), 1u);
+    EXPECT_LT(last.ledger->postedEntries().front().entry().date(), epochSeconds(kEndOfSupportedDatesEpochSeconds));
+}
+
+TEST(SessionStoreTest, LoadRejectsPersistedDatesOutsideSupportedRange) {
+    const std::vector<std::string> outOfRange = {
+        "-2208988800000000001",  // 1 ns before 1900-01-01
+        "7258118400000000000",   // 2200-01-01 itself (exclusive end)
+        "-8032952073709551616",  // the wrapped value Phase 13 observed for 2300-01-01
+        "9223372036854775807",   // std::int64_t max
+        "-9223372036854775808",  // std::int64_t min
+    };
+    for (const std::string& nanos : outOfRange) {
+        const ScopedTempFile file(uniqueTempPath("out_of_range_load"));
+        writeRawFile(file.path(), entryFileWithDate(nanos));
+        EXPECT_THROW(ledgercore::persistence::load(file.path()), PersistenceFormatException) << nanos;
+    }
 }
 
 // ---------------------------------------------------------------------

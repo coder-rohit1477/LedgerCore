@@ -22,4 +22,14 @@ public:
     explicit InvalidPostingTargetException(const std::string& message) : LedgerException(message) {}
 };
 
+// Thrown by posting::addChildAccount() when the would-be parent already
+// has posting history in the Ledger: giving it a child would turn a
+// posted leaf into a group account, which can no longer be a posting
+// target -- orphaning its history from Trial Balance and making that
+// history impossible to replay.
+class PostedAccountCannotBecomeGroupException : public ledgercore::LedgerException {
+public:
+    explicit PostedAccountCannotBecomeGroupException(const std::string& message) : LedgerException(message) {}
+};
+
 } // namespace ledgercore::posting
