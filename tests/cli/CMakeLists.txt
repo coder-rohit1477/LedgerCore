@@ -43,6 +43,7 @@ add_executable(ledgercore_cli_unit_tests
 target_link_libraries(ledgercore_cli_unit_tests
     PRIVATE
         ledgercore_cli_logic
+        ledgercore_test_support
         GTest::gtest_main
         ledgercore_warnings
 )
@@ -58,6 +59,7 @@ add_executable(ledgercore_cli_e2e_tests
 
 target_link_libraries(ledgercore_cli_e2e_tests
     PRIVATE
+        ledgercore_test_support
         GTest::gtest_main
         ledgercore_warnings
 )

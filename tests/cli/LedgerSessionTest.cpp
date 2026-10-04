@@ -14,7 +14,6 @@
 #include <fstream>
 #include <string>
 #include <system_error>
-#include <unistd.h>
 #include <utility>
 
 #include "ledgercore/domain/AccountCode.h"
@@ -28,6 +27,8 @@
 #include "ledgercore/persistence/PersistenceExceptions.h"
 #include "ledgercore/persistence/SessionStore.h"
 #include "ledgercore/posting/PostingEngine.h"
+
+#include "TestPlatform.h"
 
 using ledgercore::cli::LedgerSession;
 using ledgercore::domain::AccountCode;
@@ -46,7 +47,7 @@ std::filesystem::path uniqueTempPath(const std::string& label) {
     static int counter = 0;
     ++counter;
     return std::filesystem::temp_directory_path()
-           / ("ledgercore_session_test_" + label + "_" + std::to_string(::getpid()) + "_" + std::to_string(counter)
+           / ("ledgercore_session_test_" + label + "_" + std::to_string(ledgercore::testsupport::currentProcessId()) + "_" + std::to_string(counter)
               + ".snapshot");
 }
 

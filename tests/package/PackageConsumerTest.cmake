@@ -11,9 +11,10 @@
 #               tree's exported package (LedgerCore_DIR), without installing.
 #
 # Inputs (-D): MODE, LEDGERCORE_SOURCE_DIR, LEDGERCORE_BINARY_DIR, WORK_DIR,
-# CONSUMER_SOURCE_DIR, GENERATOR, CXX_COMPILER, BUILD_TYPE,
-# EXPECTED_VERSION, CONSUMER_FLAGS (extra compile+link flags, e.g. for a
-# sanitizer build of LedgerCore).
+# CONSUMER_SOURCE_DIR, GENERATOR, GENERATOR_PLATFORM (Visual Studio -A, may
+# be empty), CXX_COMPILER, BUILD_TYPE, EXPECTED_VERSION, EXECUTABLE_SUFFIX
+# (".exe" on Windows), CONSUMER_FLAGS (extra compile+link flags, e.g. for a
+# sanitizer build of LedgerCore; may be empty).
 
 function(run_step description)
     execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE output)
@@ -27,11 +28,24 @@ endfunction()
 function(run_consumer build_dir expect_configure_success)
     file(REMOVE_RECURSE "${build_dir}")
     set(configure_command "${CMAKE_COMMAND}" -S "${CONSUMER_SOURCE_DIR}" -B "${build_dir}" -G "${GENERATOR}"
-        "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}" "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
-        "-DCMAKE_CXX_FLAGS=${CONSUMER_FLAGS}" "-DCMAKE_EXE_LINKER_FLAGS=${CONSUMER_FLAGS}"
+        "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
         # Only the package under test may be found.
-        -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
-        ${ARGN})
+        -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF)
+    if (GENERATOR MATCHES "^Visual Studio")
+        # Visual Studio generators choose the compiler themselves; only the
+        # platform (-A) is passed through.
+        if (GENERATOR_PLATFORM)
+            list(APPEND configure_command -A "${GENERATOR_PLATFORM}")
+        endif()
+    else()
+        list(APPEND configure_command "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}")
+    endif()
+    # Passed only when set: an empty CMAKE_CXX_FLAGS would replace the
+    # toolchain's defaults (e.g. MSVC's /EHsc).
+    if (CONSUMER_FLAGS)
+        list(APPEND configure_command "-DCMAKE_CXX_FLAGS=${CONSUMER_FLAGS}" "-DCMAKE_EXE_LINKER_FLAGS=${CONSUMER_FLAGS}")
+    endif()
+    list(APPEND configure_command ${ARGN})
     if (NOT expect_configure_success)
         execute_process(COMMAND ${configure_command} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE output)
         if (result EQUAL 0)
@@ -41,7 +55,10 @@ function(run_consumer build_dir expect_configure_success)
     endif()
     run_step("Consumer configure" ${configure_command})
     run_step("Consumer build" "${CMAKE_COMMAND}" --build "${build_dir}" --config "${BUILD_TYPE}")
-    file(GLOB_RECURSE consumer_executable "${build_dir}/ledgercore_consumer" "${build_dir}/*/ledgercore_consumer")
+    # Single-config generators build into build_dir, multi-config ones into
+    # build_dir/<config>.
+    file(GLOB consumer_executable "${build_dir}/ledgercore_consumer${EXECUTABLE_SUFFIX}"
+        "${build_dir}/*/ledgercore_consumer${EXECUTABLE_SUFFIX}")
     if (NOT consumer_executable)
         message(FATAL_ERROR "Consumer executable not found under ${build_dir}")
     endif()
@@ -89,9 +106,11 @@ file(STRINGS "${package_dir}/LedgerCoreConfigVersion.cmake" version_line REGEX "
 if (NOT version_line MATCHES "\"${EXPECTED_VERSION}\"")
     message(FATAL_ERROR "Package version is not ${EXPECTED_VERSION}: ${version_line}")
 endif()
-# The installed CLI reports the same version as the package.
-run_step("Installed CLI --version" "${relocated_prefix}/bin/ledgercore" --version)
-if (NOT step_output STREQUAL "${EXPECTED_VERSION}\n")
+# The installed CLI reports the same version as the package: exactly the
+# version and one line ending (LF, or CRLF where stdout is in text mode).
+run_step("Installed CLI --version" "${relocated_prefix}/bin/ledgercore${EXECUTABLE_SUFFIX}" --version)
+string(REGEX REPLACE "\r?\n$" "" cli_version "${step_output}")
+if (cli_version STREQUAL step_output OR NOT cli_version STREQUAL "${EXPECTED_VERSION}")
     message(FATAL_ERROR "Installed ledgercore --version printed '${step_output}', expected ${EXPECTED_VERSION}")
 endif()
 file(GLOB package_files "${package_dir}/*.cmake")

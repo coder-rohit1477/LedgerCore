@@ -36,6 +36,15 @@ set(LEDGERCORE_MODULE_LIBRARIES
     ledgercore_persistence
     PARENT_SCOPE
 )
+# Debug libraries get a "d" suffix (ledgercore_domaind.lib / libledgercore_domaind.a),
+# so a Debug and a Release build can be installed into the same prefix:
+# with MSVC the two cannot be mixed in one link, and without distinct names
+# the second install would overwrite the first.
+set_target_properties(
+    ledgercore_domain ledgercore_ledger ledgercore_posting ledgercore_trialbalance ledgercore_formula
+    ledgercore_computed ledgercore_reporting ledgercore_closing ledgercore_journalquery ledgercore_persistence
+    PROPERTIES DEBUG_POSTFIX "d")
+
 add_library(ledgercore INTERFACE)
 target_link_libraries(ledgercore
     INTERFACE

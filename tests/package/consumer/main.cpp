@@ -2,6 +2,13 @@
 // trial balance, income statement, computed account, closing, journal
 // query, and a save/load round trip. Exits non-zero on any mismatch.
 
+// On Windows, <windows.h> comes first (without NOMINMAX), as in many
+// Windows applications: the installed headers must not break under its
+// min/max macros.
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <chrono>
 #include <cstdio>
 #include <exception>

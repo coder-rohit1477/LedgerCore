@@ -17,6 +17,11 @@ FetchContent_MakeAvailable(googletest)
 
 include(GoogleTest)
 
+# Test-only platform helpers (tests/support/TestPlatform.h): process ids and
+# temporary directories on Windows and POSIX.
+add_library(ledgercore_test_support INTERFACE)
+target_include_directories(ledgercore_test_support INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+
 add_executable(ledgercore_smoke_tests
     smoke_test.cpp
 )

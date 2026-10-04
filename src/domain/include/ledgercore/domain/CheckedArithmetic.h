@@ -14,8 +14,10 @@
 // throw before invoking undefined signed-overflow behavior.
 namespace ledgercore::domain::checked {
 
-inline constexpr std::int64_t kInt64Max = std::numeric_limits<std::int64_t>::max();
-inline constexpr std::int64_t kInt64Min = std::numeric_limits<std::int64_t>::min();
+// Parenthesized so the function-like min/max macros <windows.h> defines
+// (unless NOMINMAX) cannot expand here.
+inline constexpr std::int64_t kInt64Max = (std::numeric_limits<std::int64_t>::max)();
+inline constexpr std::int64_t kInt64Min = (std::numeric_limits<std::int64_t>::min)();
 
 // |value| as an unsigned 64-bit integer, exact for every input including
 // INT64_MIN (whose magnitude, 2^63, has no signed representation).

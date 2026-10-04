@@ -8,6 +8,10 @@
 #                GCC's sanitizer runtimes (libasan, libubsan) are hard
 #                dependencies of g++ on Ubuntu, so no extra packages are needed.
 #   clang-tidy   Static analysis of src/ with the repository's .clang-tidy.
+#   windows      MSVC (Visual Studio 2022), Release and Debug: configure,
+#                build, full CTest suite; reports compiler warnings; installs
+#                both configurations into one prefix and builds and runs an
+#                external find_package() consumer against each.
 #
 # Any failed configure, build, test, sanitizer report, or clang-tidy
 # finding fails the run. Compiler warnings are surfaced, not made fatal.
@@ -129,3 +133,80 @@ jobs:
         run: |
           find src -name '*.cpp' -print0 | sort -z \
             | xargs -0 -n 1 -P "$(nproc)" "${CLANG_TIDY}" -p build/tidy --quiet
+
+  windows:
+    name: Build and test (MSVC, Windows)
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          cmake --version
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property catalog_productDisplayVersion
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build (Release and Debug)
+        run: |
+          foreach ($config in 'Release', 'Debug') {
+            cmake --build build --config $config --parallel 2>&1 | Tee-Object -Append build/build.log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Report compiler warnings
+        run: |
+          $warnings = @(Select-String -Path build/build.log -Pattern ' warning [A-Z]+[0-9]+:' | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique)
+          "Compiler warnings: $($warnings.Count)" | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          $warnings | ForEach-Object { "::warning::$_" }
+
+      - name: Test (Release)
+        run: |
+          ctest --test-dir build -C Release --output-on-failure --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test (Debug)
+        run: |
+          ctest --test-dir build -C Debug --output-on-failure --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Debug and Release libraries have distinct names, so both
+      # configurations can be installed into one prefix and each consumed
+      # by a project built in the same configuration.
+      - name: Installed package (Debug and Release in one prefix)
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'ledgercore install'
+          foreach ($config in 'Release', 'Debug') {
+            cmake --install build --config $config --prefix $prefix
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Get-ChildItem (Join-Path $prefix 'lib') -File | ForEach-Object Name
+          foreach ($config in 'Release', 'Debug') {
+            $consumer = Join-Path $env:RUNNER_TEMP "consumer $config"
+            cmake -S tests/package/consumer -B $consumer -G "Visual Studio 17 2022" -A x64 "-DCMAKE_PREFIX_PATH=$prefix"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cmake --build $consumer --config $config
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $output = & (Join-Path $consumer "$config/ledgercore_consumer.exe") $consumer
+            if ($LASTEXITCODE -ne 0 -or "$output" -notmatch 'LedgerCore consumer OK') { "$output"; exit 1 }
+            "$config consumer: $output"
+          }
+          $version = & (Join-Path $prefix 'bin/ledgercore.exe') --version
+          "Installed CLI --version: $version"
+
+      - name: Check source tree is clean
+        run: |
+          $changes = git status --porcelain
+          if ($changes) {
+            $changes
+            "::error::Building or testing modified the source tree (outside the ignored build/ directory)."
+            exit 1
+          }

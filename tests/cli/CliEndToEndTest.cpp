@@ -11,11 +11,17 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
+
+#ifndef _WIN32
 #include <sys/wait.h>
-#include <unistd.h>
+#endif
+
+#include "TestPlatform.h"
 
 #ifndef LEDGERCORE_CLI_PATH
 #error "LEDGERCORE_CLI_PATH must be defined by CMake"
@@ -34,29 +40,57 @@ struct RunResult {
     std::string output;
 };
 
+// A path under the system temporary directory, unique per process and
+// call. Forward slashes, which the CLI and both shells accept.
 std::string uniqueTempPath(const std::string& label) {
     static int counter = 0;
     ++counter;
-    return "/tmp/ledgercore_cli_e2e_" + label + "_" + std::to_string(::getpid()) + "_" + std::to_string(counter)
-           + ".txt";
+    return (std::filesystem::temp_directory_path()
+            / ("ledgercore_cli_e2e_" + label + "_" + std::to_string(ledgercore::testsupport::currentProcessId()) + "_"
+               + std::to_string(counter) + ".txt"))
+        .generic_string();
 }
 
-// Runs a shell command and captures its combined output (the command
-// redirects stderr itself) and exit code.
+// Runs a shell command (/bin/sh, or cmd.exe on Windows) and captures its
+// combined output (the command redirects stderr itself) and exit code.
+// The commands built here use only syntax both shells share: quoted
+// paths, `<`, `2>&1`, and `&&`.
 RunResult runCommand(const std::string& command) {
     RunResult result;
+#ifdef _WIN32
+    // cmd.exe /c strips the outermost quotes of a command line that starts
+    // with one, so wrap the whole command in an extra pair. Text mode turns
+    // the CLI's CRLF line endings back into '\n'.
+    FILE* pipe = _popen(("\"" + command + "\"").c_str(), "rt");
+#else
     FILE* pipe = popen(command.c_str(), "r");
+#endif
     if (pipe != nullptr) {
         char buffer[256];
         while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             result.output += buffer;
         }
+#ifdef _WIN32
+        // _pclose returns the command's exit code itself.
+        result.exitCode = _pclose(pipe);
+#else
         const int status = pclose(pipe);
         result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
     } else {
         result.exitCode = -1;
     }
     return result;
+}
+
+// A shell command that makes `directory` the working directory (`cd /d` on
+// Windows, so it also switches drive).
+std::string changeDirectoryCommand(const std::string& directory) {
+#ifdef _WIN32
+    return "cd /d \"" + directory + "\"";
+#else
+    return "cd \"" + directory + "\"";
+#endif
 }
 
 // Writes `script` to a temp file, runs the CLI binary against it via
@@ -223,11 +257,11 @@ TEST(CliEndToEndTest, ScriptRoundTripSaveThenLoadRestoresOriginalStateAndDiscard
         "post --date 2026-01-01 --description sale --debit 1000:100.00 --credit 4000:100.00\n"
         "post --date 2026-01-01 --description cogs --debit 5000:40.00 --credit 1000:40.00\n"
         "computed define --name GrossProfit --formula \"#4000 - #5000\"\n"
-        "save " + snapshotPath + "\n"
+        "save \"" + snapshotPath + "\"\n"
         // Mutate the live session further -- this must be discarded by
         // the load below, not reflected in any report that follows it.
         "post --date 2026-01-02 --description later-mutation --debit 1000:9000.00 --credit 4000:9000.00\n"
-        "load " + snapshotPath + "\n"
+        "load \"" + snapshotPath + "\"\n"
         "trial-balance\n"
         "balance-sheet\n"
         "income-statement\n"
@@ -274,8 +308,8 @@ TEST(CliEndToEndTest, ReplSaveThenLoadThenTrialBalanceSucceeds) {
         "account create-root --code 1000 --name Cash --type asset\n"
         "account create-root --code 4000 --name Sales --type revenue\n"
         "post --date 2026-02-01 --description sale --debit 1000:75.00 --credit 4000:75.00\n"
-        "save " + snapshotPath + "\n"
-        "load " + snapshotPath + "\n"
+        "save \"" + snapshotPath + "\"\n"
+        "load \"" + snapshotPath + "\"\n"
         "trial-balance\n"
         "exit\n");
     std::remove(snapshotPath.c_str());
@@ -330,8 +364,8 @@ TEST(CliEndToEndTest, ReplRejectedChildUnderPostedAccountKeepsSessionSaveableAnd
         "account create-root --code 3000 --name Capital --type equity\n"
         "post --date 2026-01-01 --description \"Owner investment\" --debit 1000:500.00 --credit 3000:500.00\n"
         "account create-child --parent 1000 --code 1010 --name \"Petty cash\"\n"
-        "save " + snapshotPath + "\n"
-        "load " + snapshotPath + "\n"
+        "save \"" + snapshotPath + "\"\n"
+        "load \"" + snapshotPath + "\"\n"
         "trial-balance\n"
         "account show 1000\n"
         "exit\n");
@@ -555,8 +589,8 @@ TEST(CliEndToEndTest, ClosedSessionSavesAsV2AndReloadsWithSameReports) {
     const std::string snapshotPath = uniqueTempPath("closed_snapshot");
     const RunResult result = runRepl(std::string(kYearOneScript)
                                      + "close --retained-earnings 3100 --as-of 2027-01-01\n"
-                                       "save " + snapshotPath + "\n"
-                                       "load " + snapshotPath + "\n"
+                                       "save \"" + snapshotPath + "\"\n"
+                                       "load \"" + snapshotPath + "\"\n"
                                        "income-statement --from 2026-01-01 --to 2027-01-01\n"
                                        "trial-balance\n"
                                        "exit\n");
@@ -640,8 +674,8 @@ TEST(CliEndToEndTest, ClosedPeriodSurvivesSaveAndLoad) {
     const RunResult result = runRepl(std::string(kYearOneScript)
                                      + "period create --start 2026-01-01 --end 2027-01-01\n"
                                        "period close --start 2026-01-01 --end 2027-01-01\n"
-                                       "save " + snapshotPath + "\n"
-                                       "load " + snapshotPath + "\n"
+                                       "save \"" + snapshotPath + "\"\n"
+                                       "load \"" + snapshotPath + "\"\n"
                                        "period list\n"
                                        "post --date 2026-06-15 --description backdated --debit 1000:1.00 --credit 4000:1.00\n"
                                        "exit\n");
@@ -758,15 +792,15 @@ TEST(CliEndToEndTest, LoadingA100000LevelSnapshotFailsCleanlyAndTheSessionSurviv
             out << "ACCOUNT CHILD D" << level - 1 << " D" << level << " \"Deep\"\n";
         }
     }
-    const RunResult script = runScript("load " + snapshotPath + "\n");
+    const RunResult script = runScript("load \"" + snapshotPath + "\"\n");
     EXPECT_EQ(script.exitCode, 2);
     EXPECT_NE(script.output.find("the account tree may be at most 1000 levels deep"), std::string::npos)
         << script.output;
 
     const RunResult repl = runRepl("account create-root --code 1000 --name Cash --type asset\n"
-                                   "load " + snapshotPath + "\n"
+                                   "load \"" + snapshotPath + "\"\n"
                                    "trial-balance\n"
-                                   "save " + snapshotPath + ".after\n"
+                                   "save \"" + snapshotPath + ".after\"\n"
                                    "exit\n");
     std::remove(snapshotPath.c_str());
     std::remove((snapshotPath + ".after").c_str());
@@ -795,7 +829,7 @@ TEST(CliEndToEndTest, SnapshotBeyondTheClosingEntryCapFailsWithAccountingExitCod
             out << "CLOSING " << base + i * 2000000000LL + 1000000000LL << " \"c\"\n  DEBIT 4000 100\n  CREDIT 3100 100\n";
         }
     }
-    const RunResult result = runScript("load " + snapshotPath + "\n");
+    const RunResult result = runScript("load \"" + snapshotPath + "\"\n");
     std::remove(snapshotPath.c_str());
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_NE(result.output.find("A Ledger may hold at most 1000 closing entries"), std::string::npos) << result.output;
@@ -817,13 +851,11 @@ TEST(CliEndToEndTest, ComputedEvaluationBudgetFailureUsesAccountingExitCode) {
 // the documented demo from drifting out of date. It saves relative to the
 // working directory, so it runs inside a fresh temporary directory.
 TEST(CliEndToEndTest, ReadmeDemoScriptRunsAndItsReloadedSessionSavesIdentically) {
-    char directoryTemplate[] = "/tmp/ledgercore_cli_e2e_demo_XXXXXX";
-    const char* directory = ::mkdtemp(directoryTemplate);
-    ASSERT_NE(directory, nullptr);
-    const std::string dir(directory);
+    const std::filesystem::path directory = ledgercore::testsupport::makeUniqueTempDirectory("ledgercore_cli_e2e_demo");
+    const std::string dir = directory.generic_string();
 
-    const RunResult result = runCommand("cd \"" + dir + "\" && \"" + std::string(LEDGERCORE_CLI_PATH) + "\" --script \""
-                                        + LEDGERCORE_DEMO_SCRIPT + "\" 2>&1");
+    const RunResult result = runCommand(changeDirectoryCommand(dir) + " && \"" + std::string(LEDGERCORE_CLI_PATH)
+                                        + "\" --script \"" + LEDGERCORE_DEMO_SCRIPT + "\" 2>&1");
     const auto readFile = [](const std::string& path) {
         std::ifstream in(path, std::ios::binary);
         std::ostringstream content;
@@ -832,9 +864,8 @@ TEST(CliEndToEndTest, ReadmeDemoScriptRunsAndItsReloadedSessionSavesIdentically)
     };
     const std::string saved = readFile(dir + "/demo.snapshot");
     const std::string resaved = readFile(dir + "/demo-reloaded.snapshot");
-    std::remove((dir + "/demo.snapshot").c_str());
-    std::remove((dir + "/demo-reloaded.snapshot").c_str());
-    ::rmdir(directory);
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
 
     EXPECT_EQ(result.exitCode, 0) << result.output;
     EXPECT_NE(result.output.find("posted closing entry #4 into 3100 as of 2027-01-01 (net income 450.00 USD)"),
@@ -895,4 +926,35 @@ TEST(CliEndToEndTest, VersionInsideAScriptIsAnUnknownCommand) {
     const RunResult result = runScript("--version\n");
     EXPECT_EQ(result.exitCode, 1);
     EXPECT_NE(result.output.find("unknown command: '--version'"), std::string::npos) << result.output;
+}
+
+// Paths containing spaces -- common in Windows user and temp directories --
+// work for the script path and for save/load inside a script.
+TEST(CliEndToEndTest, ScriptAndSnapshotPathsMayContainSpaces) {
+    const std::filesystem::path directory = ledgercore::testsupport::makeUniqueTempDirectory("ledgercore cli e2e spaces");
+    const std::string snapshotPath = (directory / "my books.snapshot").generic_string();
+    const std::string scriptPath = (directory / "my script.txt").generic_string();
+    {
+        std::ofstream out(scriptPath);
+        out << "account create-root --code 1000 --name Cash --type asset\n"
+               "account create-root --code 4000 --name Sales --type revenue\n"
+               "post --date 2026-04-15 --description \"Sale\" --debit 1000:25.00 --credit 4000:25.00\n"
+               "save \"" << snapshotPath << "\"\n"
+               "load \"" << snapshotPath << "\"\n"
+               "trial-balance\n";
+    }
+
+    const RunResult result =
+        runCommand(std::string("\"") + LEDGERCORE_CLI_PATH + "\" --script \"" + scriptPath + "\" 2>&1");
+    const bool snapshotWritten = std::filesystem::exists(snapshotPath);
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+
+    EXPECT_EQ(result.exitCode, 0) << result.output;
+    EXPECT_TRUE(snapshotWritten);
+    EXPECT_NE(result.output.find("Loaded LedgerCore session from \"" + snapshotPath + "\"."), std::string::npos)
+        << result.output;
+    EXPECT_NE(result.output.find("TOTAL                                      25.00 USD         25.00 USD"),
+              std::string::npos)
+        << result.output;
 }

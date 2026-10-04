@@ -20,9 +20,11 @@ foreach(mode install build-tree)
             "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/${mode}"
             "-DCONSUMER_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/consumer"
             "-DGENERATOR=${CMAKE_GENERATOR}"
+            "-DGENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
             "-DBUILD_TYPE=$<CONFIG>"
             "-DEXPECTED_VERSION=${PROJECT_VERSION}"
+            "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
             "-DCONSUMER_FLAGS=${consumer_flags}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/PackageConsumerTest.cmake"
     )

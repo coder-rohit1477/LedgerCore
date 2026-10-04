@@ -17,7 +17,6 @@
 #include <random>
 #include <string>
 #include <system_error>
-#include <unistd.h>
 #include <vector>
 
 #include "ledgercore/computed/ComputedAccountRegistry.h"
@@ -44,6 +43,8 @@
 #include "ledgercore/reporting/BalanceSheet.h"
 #include "ledgercore/reporting/IncomeStatement.h"
 #include "ledgercore/trialbalance/TrialBalance.h"
+
+#include "TestPlatform.h"
 
 using ledgercore::computed::ComputedAccountRegistry;
 using ledgercore::computed::LedgerAccountResolver;
@@ -79,7 +80,7 @@ std::filesystem::path uniqueTempPath(const std::string& label) {
     static int counter = 0;
     ++counter;
     return std::filesystem::temp_directory_path()
-           / ("ledgercore_persistence_test_" + label + "_" + std::to_string(::getpid()) + "_"
+           / ("ledgercore_persistence_test_" + label + "_" + std::to_string(ledgercore::testsupport::currentProcessId()) + "_"
               + std::to_string(counter) + ".snapshot");
 }
 
@@ -920,19 +921,20 @@ TEST(SessionStoreTest, FailedSaveLeavesExistingTargetFileUntouched) {
     ComputedAccountRegistry registry;
 
     const std::filesystem::path directory =
-        std::filesystem::temp_directory_path() / ("ledgercore_persistence_save_safety_" + std::to_string(::getpid()));
-    std::filesystem::create_directories(directory);
+        ledgercore::testsupport::makeUniqueTempDirectory("ledgercore_persistence_save_safety");
     const std::filesystem::path target = directory / "session.snapshot";
 
     ledgercore::persistence::save(chart, ledger, registry, target);
     ASSERT_TRUE(std::filesystem::exists(target));
     const std::string originalContent = readRawFile(target);
 
-    // Remove write permission on the directory so creating the temporary
-    // file (needed before the atomic rename) deterministically fails,
-    // while the pre-existing target file's own content is untouched.
-    std::filesystem::permissions(directory, std::filesystem::perms::owner_write,
-                                  std::filesystem::perm_options::remove);
+    // Occupy the temporary file's path (save() writes <target>.tmp before
+    // the atomic rename) with a directory, so opening the temporary file
+    // deterministically fails -- on every platform and for every user,
+    // including root -- while the pre-existing target is untouched.
+    std::filesystem::path blockedTempPath = target;
+    blockedTempPath += ".tmp";
+    ASSERT_TRUE(std::filesystem::create_directory(blockedTempPath));
 
     bool threw = false;
     try {
@@ -941,10 +943,9 @@ TEST(SessionStoreTest, FailedSaveLeavesExistingTargetFileUntouched) {
         threw = true;
     }
 
-    std::filesystem::permissions(directory, std::filesystem::perms::owner_write, std::filesystem::perm_options::add);
-
     EXPECT_TRUE(threw);
     EXPECT_EQ(readRawFile(target), originalContent);
+    EXPECT_TRUE(std::filesystem::is_directory(blockedTempPath));
 
     std::error_code ec;
     std::filesystem::remove_all(directory, ec);
@@ -2300,4 +2301,68 @@ TEST(SessionStoreTest, PeriodBoundsLoadExactlyOrAreRejected) {
             EXPECT_TRUE(periods.front().isClosed());
         });
     }
+}
+
+// ---------------------------------------------------------------------
+// Non-ASCII paths (Phase 26)
+// ---------------------------------------------------------------------
+//
+// Characters outside the active narrow code page (here CJK and Greek) are
+// representable in std::filesystem::path everywhere, but not as a narrow
+// std::string on Windows. save()/load() and their error reporting must
+// keep the documented contract for such paths: success, or
+// PersistenceException -- never a stray conversion exception.
+
+namespace {
+
+std::filesystem::path nonAsciiFileName(const std::string& suffix) {
+    return std::filesystem::u8path(u8"ledgercore-台帳-Ω" + suffix);
+}
+
+} // namespace
+
+TEST(SessionStoreTest, SaveAndLoadWorkThroughANonAsciiPath) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    StandardAccounts accounts = setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+    post(JournalEntry::create(day(10), "Sale",
+                               {JournalEntryLine::debit(accounts.cash, Money::fromMajorUnits(5, 0, usd)),
+                                JournalEntryLine::credit(accounts.revenue, Money::fromMajorUnits(5, 0, usd))}),
+         chart, ledger);
+
+    const std::filesystem::path directory = ledgercore::testsupport::makeUniqueTempDirectory("ledgercore_unicode");
+    const std::filesystem::path target = directory / nonAsciiFileName(".snapshot");
+
+    ledgercore::persistence::save(chart, ledger, registry, target);
+    ledgercore::persistence::save(chart, ledger, registry, target);  // replaces the existing file
+    LoadedSession loaded = ledgercore::persistence::load(target);
+    const std::size_t entries = loaded.ledger->postedEntries().size();
+
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+    EXPECT_EQ(entries, 1u);
+}
+
+TEST(SessionStoreTest, FailuresOnANonAsciiPathAreReportedAsPersistenceExceptions) {
+    Currency usd("USD");
+    ChartOfAccounts chart;
+    setUpStandardChart(chart);
+    Ledger ledger(usd);
+    ComputedAccountRegistry registry;
+
+    const std::filesystem::path directory = ledgercore::testsupport::makeUniqueTempDirectory("ledgercore_unicode_fail");
+    const std::filesystem::path missing = directory / nonAsciiFileName("-missing.snapshot");
+    const std::filesystem::path target = directory / nonAsciiFileName(".snapshot");
+    std::filesystem::path blockedTempPath = target;
+    blockedTempPath += ".tmp";
+    std::filesystem::create_directory(blockedTempPath);
+
+    EXPECT_THROW(ledgercore::persistence::load(missing), PersistenceException);
+    EXPECT_THROW(ledgercore::persistence::save(chart, ledger, registry, target), PersistenceException);
+    EXPECT_FALSE(std::filesystem::exists(target));
+
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
 }

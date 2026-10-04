@@ -34,7 +34,23 @@ namespace {
 // the next one throws.
 long g_allocationsUntilFailure = -1;
 
+// MSVC's debug standard library (_ITERATOR_DEBUG_LEVEL == 2, the default
+// in Debug builds) allocates a container proxy inside container
+// operations that are noexcept -- including move construction -- and
+// terminates by design if that allocation fails. Failing it would test the
+// standard library's debug bookkeeping, not LedgerCore, so allocations of
+// exactly the proxy's size are never failed (nor counted) there; every
+// other allocation is still failed in turn. No other configuration or
+// platform exempts anything.
 void* allocate(std::size_t size) {
+#if defined(_MSC_VER) && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL == 2
+    if (size == sizeof(std::_Container_proxy)) {
+        if (void* memory = std::malloc(size)) {
+            return memory;
+        }
+        throw std::bad_alloc();
+    }
+#endif
     if (g_allocationsUntilFailure == 0) {
         g_allocationsUntilFailure = -1;
         throw std::bad_alloc();
@@ -118,7 +134,9 @@ Money usd(long long major) {
 
 // Runs operation with the n-th allocation failing, for n = 0, 1, 2, ...,
 // calling verifyUnchanged() after each injected failure, until operation
-// succeeds. Returns the number of injected failures.
+// succeeds. Returns the number of injected failures, which must be
+// positive: every operation under test allocates, so a run that injected
+// nothing would have verified nothing.
 int runWithEveryAllocationFailing(const std::function<void()>& operation,
                                   const std::function<void()>& verifyUnchanged) {
     for (int failures = 0; failures < 10000; ++failures) {
@@ -126,6 +144,7 @@ int runWithEveryAllocationFailing(const std::function<void()>& operation,
         try {
             operation();
             g_allocationsUntilFailure = -1;
+            EXPECT_GT(failures, 0) << "no allocation failure was injected";
             return failures;
         } catch (const std::bad_alloc&) {
             g_allocationsUntilFailure = -1;

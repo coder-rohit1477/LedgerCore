@@ -26,7 +26,7 @@ Each item below is backed by the test suite or CI in this repository unless mark
 - **Exception safety.** Posting, closing, adding accounts, and defining computed accounts are all-or-nothing. A dedicated test binary replaces the global allocator and re-runs each operation with every one of its allocations failing in turn, checking that no observable state changed.
 - **Persistence through the front door.** Loading a snapshot rebuilds the session by replaying every journal entry through `posting::post`, so a hand-edited file is held to exactly the rules live callers are; a failed load never yields a partial session.
 - **Bounded adversarial input.** Explicit limits on chart depth, formula depth, computed-evaluation depth, and closing-entry count (see [Resource Limits](#resource-limits-and-complexity)) turn hostile snapshots and formulas into ordinary errors instead of unbounded recursion or quadratic hangs.
-- **Verification.** 751 tests, including two that build and run an external project against the installed (and relocated) CMake package. CI on every push: GCC 13 `Release`; GCC `Debug` with AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer; clang-tidy 18 with any finding fatal. The same suite is also run locally on macOS with AppleClang, in `Release` and under ASan/UBSan. Project targets build with zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`.
+- **Verification.** 754 tests, including two that build and run an external project against the installed (and relocated) CMake package. CI on every push: GCC 13 `Release`; GCC `Debug` with AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer; clang-tidy 18 with any finding fatal; MSVC (Visual Studio 2022) on Windows, `Release` and `Debug`. The same suite is also run locally on macOS with AppleClang, in `Release` and under ASan/UBSan. Project targets build with zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`.
 
 Measured performance (one machine — Apple M5, 16 GB, AppleClang 21, `Release` — using an ad-hoc timing harness that is not part of this repository; indicative only, not a guarantee):
 
@@ -357,7 +357,7 @@ These limits bound recursion depth and time, **not total memory**: input size it
 
 ## 9. Testing
 
-**751 tests**, all passing: 749 GoogleTest cases, organized as one executable per module (two for the CLI) plus a single smoke test, and 2 CMake package tests.
+**754 tests**, all passing: 752 GoogleTest cases, organized as one executable per module (two for the CLI) plus a single smoke test, and 2 CMake package tests.
 
 | Module | Tests |
 |---|---|
@@ -370,9 +370,9 @@ These limits bound recursion depth and time, **not total memory**: input size it
 | reporting | 30 |
 | closing | 40 |
 | journalquery | 22 |
-| persistence (including exact timestamp reconstruction) | 95 |
+| persistence (including exact timestamp reconstruction and non-ASCII paths) | 97 |
 | exception safety (allocation-failure injection) | 5 |
-| cli (input parsing, command parsing, session, process-level end-to-end including `--version` and usage errors, the demo script) | 125 |
+| cli (input parsing, command parsing, session, process-level end-to-end including `--version`, usage errors, and paths with spaces, the demo script) | 126 |
 | smoke | 1 |
 | package (an external `find_package` consumer: relocated install tree, and build tree) | 2 |
 
@@ -398,7 +398,7 @@ Code coverage is not currently measured by this repository, so no coverage perce
 
 ## 10. Build & Test
 
-Requires **CMake >= 3.20** and a **C++17** compiler. Tested platforms: Linux with GCC 13 (CI also runs clang-tidy 18) and macOS with AppleClang. Windows is not currently supported — the end-to-end tests use POSIX process and file APIs. Configuring with tests enabled downloads GoogleTest (v1.14.0) via CMake `FetchContent`, so the first configure needs network access; no manual GoogleTest installation is needed.
+Requires **CMake >= 3.20** and a **C++17** compiler. Tested platforms: Linux with GCC 13 (CI also runs clang-tidy 18), macOS with AppleClang, and Windows x64 with MSVC (Visual Studio 2022, CI). Configuring with tests enabled downloads GoogleTest (v1.14.0) via CMake `FetchContent`, so the first configure needs network access; no manual GoogleTest installation is needed.
 
 ```sh
 cmake -S . -B build
@@ -415,6 +415,16 @@ ctest --test-dir build-sanitize --output-on-failure
 ```
 
 Any UB report aborts the offending test process, so it surfaces as a CTest failure.
+
+On Windows, Visual Studio generators build several configurations in one build directory, so the configuration is chosen when building and testing (PowerShell or `cmd`):
+
+```sh
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+`LEDGERCORE_SANITIZE` is GCC/Clang-only; sanitizer and clang-tidy runs are part of the Linux CI.
 
 Build options:
 
@@ -469,17 +479,20 @@ target_link_libraries(my_app PRIVATE LedgerCore::ledgercore)
 
 The libraries are static. Building them into a shared library needs position-independent code (`-DCMAKE_POSITION_INDEPENDENT_CODE=ON` when building LedgerCore).
 
+Debug libraries carry a `d` suffix (`ledgercore_domaind.lib`, `libledgercore_domaind.a`), so a Debug and a Release build can be installed into the same prefix, and `find_package` picks the one matching the consumer's configuration. With MSVC, a consumer must use the same configuration (Debug or Release) and the same runtime library as the LedgerCore build it links: MSVC refuses to link mixed `_ITERATOR_DEBUG_LEVEL` or `RuntimeLibrary` values (error LNK2038). LedgerCore uses CMake's default runtime — the DLL runtime, `/MD` (Release) and `/MDd` (Debug); a project using the static runtime (`/MT`) builds LedgerCore with the same `CMAKE_MSVC_RUNTIME_LIBRARY`.
+
 Journal entry dates are supported from 1900-01-01 up to (not including) 2200-01-01 UTC — the range the snapshot format's nanosecond timestamps can represent with margin. The CLI and persistence reject dates outside it rather than clamping them.
 
 ### Continuous Integration
 
-GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push to `main` and every pull request, on `ubuntu-24.04`. Any configure, build, or test failure, sanitizer report, or clang-tidy finding fails the run; compiler warnings are reported (count in the job summary, each as an annotation) but not made fatal.
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push to `main` and every pull request, on `ubuntu-24.04` and `windows-2022`. Any configure, build, or test failure, sanitizer report, or clang-tidy finding fails the run; compiler warnings are reported (count in the job summary, each as an annotation) but not made fatal.
 
 | Job | Toolchain / configuration | Checks |
 |---|---|---|
 | Build and test | GCC, `Release` | configure, build, full CTest suite, warning count, source tree left clean |
 | ASan + UBSan | GCC, `Debug`, `-DLEDGERCORE_SANITIZE=ON` | confirms both sanitizers are compiled in and linked, then the full CTest suite (with LeakSanitizer) |
 | Static analysis | clang-tidy 18 with [`.clang-tidy`](.clang-tidy) | every `src/**/*.cpp` file and project headers; any finding is an error |
+| Windows | MSVC (Visual Studio 2022, `windows-2022`), `Release` and `Debug` | configure, build, warning count, full CTest suite in both configurations, both configurations installed into one prefix and consumed by an external `find_package` project, source tree left clean |
 
 To reproduce locally, use the build and sanitizer commands above (add `-DCMAKE_BUILD_TYPE=Release` or `Debug` to match CI), and for static analysis:
 
@@ -490,7 +503,7 @@ find src -name '*.cpp' | xargs clang-tidy -p build-tidy --quiet
 
 ### Running the CLI
 
-The executable is built at `build/src/cli/ledgercore`. A new session uses USD; a loaded snapshot keeps the currency it was saved with.
+The executable is built at `build/src/cli/ledgercore` (with Visual Studio generators, `build\src\cli\<config>\ledgercore.exe`). A new session uses USD; a loaded snapshot keeps the currency it was saved with.
 
 ```sh
 build/src/cli/ledgercore                    # interactive REPL
@@ -611,6 +624,7 @@ LedgerCore/
 │   ├── exceptionsafety/
 │   ├── cli/
 │   ├── package/
+│   ├── support/
 │   └── smoke_test.cpp
 ├── .clang-tidy
 ├── CMakeLists.txt
@@ -640,14 +654,14 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 - **At most 1,000 closing entries per ledger.** Closing validation replays history, and the cap bounds that cost; it is a limit, not an incremental algorithm.
 - **Memory is not bounded.** The resource limits bound recursion and time, not input size (see [Resource Limits](#resource-limits-and-complexity)).
 - **Static libraries only, no prebuilt binaries.** LedgerCore is built from source with CMake; there is no shared-library build option and no package-manager (vcpkg/Conan) recipe.
-- **Linux and macOS only.** Windows is not supported; the end-to-end test harness uses POSIX APIs.
+- **Platforms.** Linux (GCC), macOS (AppleClang), and Windows x64 (MSVC) are tested; sanitizer and clang-tidy runs are Linux-only. MinGW-w64 is not part of CI. The CLI takes file paths as narrow command-line arguments, so on Windows a path the process's narrow encoding cannot represent cannot be passed to it (the library API takes `std::filesystem::path` and has no such limit).
 - **No coverage measurement**, so no coverage percentage is claimed.
 
 ## 15. Current Status
 
 Version **1.1.0**, tagged `v1.1.0` (adds the installable CMake package; engine behaviour is identical to `v1.0.0`/`v1.0.1`). Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
-- 751 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
+- 754 tests, all passing: GCC (CI) and AppleClang, in the normal and the AddressSanitizer/UndefinedBehaviorSanitizer builds, and MSVC (CI), in `Release` and `Debug`
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 
@@ -658,7 +672,6 @@ This is not a claim of production readiness — see [Overview](#1-overview).
 Reasonable, currently-unimplemented future work:
 
 - Reopening a closed accounting period (deliberately unsupported today: `Open → Closed` is one-way)
-- Windows support (the engine is portable C++17; the end-to-end test harness is POSIX-only)
 - Incremental closing-entry validation, which would remove the need for the closing-entry cap
 - Coverage-guided fuzzing (libFuzzer) of the snapshot, formula, and CLI parsers; today they are covered by seeded fuzz-smoke tests
 - Richer fiscal-period abstractions (e.g. named fiscal calendars) built on top of the existing `Period` primitive

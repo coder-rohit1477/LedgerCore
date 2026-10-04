@@ -21,6 +21,7 @@ target_link_libraries(ledgercore_persistence_tests
         ledgercore_persistence
         ledgercore_reporting
         ledgercore_journalquery
+        ledgercore_test_support
         GTest::gtest_main
         ledgercore_warnings
 )

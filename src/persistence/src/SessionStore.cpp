@@ -594,12 +594,16 @@ void applyPeriods(const std::vector<PendingPeriod>& pendingPeriods, ledger::Ledg
 
 void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
           const computed::ComputedAccountRegistry& computedAccounts, const std::filesystem::path& path) {
-    const std::filesystem::path tempPath = path.string() + ".tmp";
+    // Built and reported without narrowing the path: on Windows a narrow
+    // std::string uses the active code page, which cannot represent every
+    // file name a std::filesystem::path can.
+    std::filesystem::path tempPath = path;
+    tempPath += ".tmp";
 
     {
         std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
         if (!out.is_open()) {
-            throw PersistenceException("cannot open temporary file for writing: " + tempPath.string());
+            throw PersistenceException("cannot open temporary file for writing: " + tempPath.u8string());
         }
 
         try {
@@ -616,7 +620,7 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
             out.close();
             std::error_code removeError;
             std::filesystem::remove(tempPath, removeError);
-            throw PersistenceException("failed writing snapshot to temporary file: " + tempPath.string());
+            throw PersistenceException("failed writing snapshot to temporary file: " + tempPath.u8string());
         }
         out.close();
     }
@@ -626,14 +630,14 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
     if (renameError) {
         std::error_code removeError;
         std::filesystem::remove(tempPath, removeError);
-        throw PersistenceException("failed to finalize snapshot at " + path.string() + ": " + renameError.message());
+        throw PersistenceException("failed to finalize snapshot at " + path.u8string() + ": " + renameError.message());
     }
 }
 
 LoadedSession load(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) {
-        throw PersistenceException("cannot open file for reading: " + path.string());
+        throw PersistenceException("cannot open file for reading: " + path.u8string());
     }
     const std::vector<std::string> lines = readAllLines(in);
     in.close();
