@@ -110,8 +110,10 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
 // (missing/malformed header, wrong field count, malformed integer, unknown
 // record or AccountType token, unterminated quoted string, a truncated
 // file, or an ACCOUNT CHILD record naming a parent AccountCode this file
-// has not already declared, or an ENTRY date outside the supported range
-// above), or the relevant existing domain/posting/formula
+// has not already declared, an ENTRY date outside the supported range
+// above, or an ENTRY/CLOSING date or PERIOD bound that this platform's
+// system_clock cannot represent exactly -- such a timestamp is rejected,
+// never rounded), or the relevant existing domain/posting/formula
 // exception (e.g. domain::DuplicateAccountCodeException,
 // domain::UnbalancedJournalEntryException, posting::AccountNotFoundException,
 // posting::PostedAccountCannotBecomeGroupException (an ACCOUNT CHILD record

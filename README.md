@@ -26,7 +26,7 @@ Each item below is backed by the test suite or CI in this repository unless mark
 - **Exception safety.** Posting, closing, adding accounts, and defining computed accounts are all-or-nothing. A dedicated test binary replaces the global allocator and re-runs each operation with every one of its allocations failing in turn, checking that no observable state changed.
 - **Persistence through the front door.** Loading a snapshot rebuilds the session by replaying every journal entry through `posting::post`, so a hand-edited file is held to exactly the rules live callers are; a failed load never yields a partial session.
 - **Bounded adversarial input.** Explicit limits on chart depth, formula depth, computed-evaluation depth, and closing-entry count (see [Resource Limits](#resource-limits-and-complexity)) turn hostile snapshots and formulas into ordinary errors instead of unbounded recursion or quadratic hangs.
-- **Verification.** 740 tests, including two that build and run an external project against the installed (and relocated) CMake package. CI on every push: GCC 13 `Release`; GCC `Debug` with AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer; clang-tidy 18 with any finding fatal. The same suite is also run locally on macOS with AppleClang, in `Release` and under ASan/UBSan. Project targets build with zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`.
+- **Verification.** 751 tests, including two that build and run an external project against the installed (and relocated) CMake package. CI on every push: GCC 13 `Release`; GCC `Debug` with AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer; clang-tidy 18 with any finding fatal. The same suite is also run locally on macOS with AppleClang, in `Release` and under ASan/UBSan. Project targets build with zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`.
 
 Measured performance (one machine — Apple M5, 16 GB, AppleClang 21, `Release` — using an ad-hoc timing harness that is not part of this repository; indicative only, not a guarantee):
 
@@ -129,6 +129,7 @@ Measured performance (one machine — Apple M5, 16 GB, AppleClang 21, `Release` 
 - All-or-nothing load: a malformed or invalid file throws and never yields a partial session
 - Atomic save: temporary file, flush, close, then rename over the target
 - Supported journal-entry dates: `[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)`; out-of-range dates are rejected on save, on load, and by the CLI, never clamped
+- Timestamps are stored in nanoseconds and loaded exactly or not at all: a timestamp finer than the loading platform's clock (microseconds on macOS, 100 ns with MSVC, nanoseconds on Linux) is rejected rather than rounded, since rounding could move an entry or period bound across a day, period, or as-of boundary. Microsecond-aligned timestamps — including every CLI date and closing entry — load on every supported platform
 
 ### Command-Line Interface
 - `ledgercore` with no arguments starts an interactive REPL; `ledgercore --script <file>` runs commands from a file; `ledgercore --version` prints the version
@@ -356,7 +357,7 @@ These limits bound recursion depth and time, **not total memory**: input size it
 
 ## 9. Testing
 
-**740 tests**, all passing: 738 GoogleTest cases, organized as one executable per module (two for the CLI) plus a single smoke test, and 2 CMake package tests.
+**751 tests**, all passing: 749 GoogleTest cases, organized as one executable per module (two for the CLI) plus a single smoke test, and 2 CMake package tests.
 
 | Module | Tests |
 |---|---|
@@ -369,7 +370,7 @@ These limits bound recursion depth and time, **not total memory**: input size it
 | reporting | 30 |
 | closing | 40 |
 | journalquery | 22 |
-| persistence | 84 |
+| persistence (including exact timestamp reconstruction) | 95 |
 | exception safety (allocation-failure injection) | 5 |
 | cli (input parsing, command parsing, session, process-level end-to-end including `--version` and usage errors, the demo script) | 125 |
 | smoke | 1 |
@@ -389,7 +390,7 @@ The suite mixes unit, integration, and property-style tests, targeted at the inv
 - adversarial input: deep charts, deep formulas and dependency chains at and beyond every limit, and seeded fuzz-smoke tests that corrupt valid snapshots and feed random text to the formula and CLI parsers (no crash, only LedgerCore errors — under ASan/UBSan in CI)
 - journal history queries (each filter and their combination, `[start, end)` boundaries, posting-order determinism, same-date ordering, exact Money/currency, read-only behaviour, identical results across save/load for v1/v2/v3)
 - closing entries (sign correctness for every account type, net income/loss, contra balances, invalid targets, atomic failure, repeated and multi-year closing, report consistency before and after closing)
-- persistence round trips (save → load → save is byte-identical), corruption and version handling, failed-load isolation, date-range boundaries
+- persistence round trips (save → load → save is byte-identical), corruption and version handling, failed-load isolation, date-range boundaries, exact-or-rejected timestamp loading for every clock tick size (nanosecond, 100 ns, microsecond), including pre-1970 instants
 - CLI behavior through the real executable (exit codes, REPL vs. script error handling, save/load)
 - compile-time API guarantees (e.g. `Account` is neither copyable nor movable; the raw child-attach operation is not publicly callable)
 
@@ -646,7 +647,7 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 Version **1.1.0**, tagged `v1.1.0` (adds the installable CMake package; engine behaviour is identical to `v1.0.0`/`v1.0.1`). Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
-- 740 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
+- 751 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 

@@ -6,6 +6,14 @@
 # redundancy already fixed once in the CLI's own CMakeLists.txt.
 add_executable(ledgercore_persistence_tests
     SessionStoreTest.cpp
+    TimestampConversionTest.cpp
+)
+
+# TimestampConversionTest exercises a persistence-internal header
+# (src/persistence/src/TimestampConversion.h), which is not installed.
+target_include_directories(ledgercore_persistence_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/persistence/src
 )
 
 target_link_libraries(ledgercore_persistence_tests

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -25,6 +26,8 @@
 #include "ledgercore/persistence/PersistenceExceptions.h"
 #include "ledgercore/posting/PostingEngine.h"
 #include "ledgercore/posting/PostingExceptions.h"
+
+#include "TimestampConversion.h"
 
 namespace ledgercore::persistence {
 
@@ -253,10 +256,21 @@ std::int64_t nanosSinceEpoch(std::chrono::system_clock::time_point tp) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
 }
 
-// Precondition: kMinSupportedNanos <= nanos < kEndOfSupportedNanos.
-std::chrono::system_clock::time_point timePointFromNanos(std::int64_t nanos) {
-    return std::chrono::system_clock::time_point{}
-           + std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::nanoseconds(nanos));
+// Rebuilds a persisted instant exactly, or rejects it: a timestamp finer
+// than this platform's system_clock tick (written where the clock is
+// finer) is never rounded, since rounding can move an entry or period
+// bound across a day, period, or as-of boundary.
+//
+// Precondition: kMinSupportedNanos <= nanos <= kEndOfSupportedNanos.
+std::chrono::system_clock::time_point timePointFromNanos(std::int64_t nanos, const std::string& field,
+                                                         std::size_t lineNumber) {
+    const std::optional<std::chrono::system_clock::duration> sinceEpoch =
+        detail::exactDurationFromNanos<std::chrono::system_clock::duration>(nanos);
+    if (!sinceEpoch) {
+        throw PersistenceFormatException(field + " " + std::to_string(nanos) + " at line " + std::to_string(lineNumber)
+                                          + " cannot be represented exactly by this platform's clock");
+    }
+    return std::chrono::system_clock::time_point{} + *sinceEpoch;
 }
 
 // ---------------------------------------------------------------------
@@ -508,7 +522,7 @@ void replayJournalRecord(const std::vector<std::string>& tokens, std::size_t lin
                                           + " is outside the supported range "
                                             "[1900-01-01T00:00:00Z, 2200-01-01T00:00:00Z)");
     }
-    const std::chrono::system_clock::time_point date = timePointFromNanos(nanos);
+    const std::chrono::system_clock::time_point date = timePointFromNanos(nanos, recordType + " date", lineNumber);
     const std::string& description = tokens[2];
 
     std::vector<domain::JournalEntryLine> entryLines = parseEntryLines(lines, index, chart, ledger.currency());
@@ -546,8 +560,9 @@ PendingPeriod parsePeriodRecord(const std::vector<std::string>& tokens, std::siz
     }
     // start >= end fails here (domain::InvalidPeriodException); overlaps
     // and duplicates fail when the periods are applied.
-    return PendingPeriod{domain::Period(timePointFromNanos(startNanos), timePointFromNanos(endNanos)),
-                         state == "CLOSED"};
+    const std::chrono::system_clock::time_point start = timePointFromNanos(startNanos, "PERIOD start", lineNumber);
+    const std::chrono::system_clock::time_point end = timePointFromNanos(endNanos, "PERIOD end", lineNumber);
+    return PendingPeriod{domain::Period(start, end), state == "CLOSED"};
 }
 
 void defineComputedRecord(const std::vector<std::string>& tokens, std::size_t lineNumber,

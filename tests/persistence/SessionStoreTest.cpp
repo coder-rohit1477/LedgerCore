@@ -2153,3 +2153,151 @@ TEST(SessionStorePropertyTest, SaveIsDeterministicAcrossRepeatedCallsWithUnchang
 
     EXPECT_EQ(readRawFile(fileA.path()), readRawFile(fileB.path()));
 }
+
+// ---------------------------------------------------------------------
+// Persisted timestamps load exactly or not at all (Phase 25)
+// ---------------------------------------------------------------------
+//
+// Snapshots store nanoseconds; a platform whose system_clock is coarser
+// (microseconds on macOS, 100ns with MSVC) must reject a timestamp it
+// cannot represent exactly instead of truncating it. The expectation
+// follows the host clock, computed independently of the implementation
+// (a whole multiple of the tick); TimestampConversionTest covers every
+// tick size on every host. Microsecond-aligned timestamps load everywhere.
+
+namespace {
+
+constexpr std::int64_t kNanosPerDayInFile = 86'400'000'000'000;
+
+std::int64_t hostTickNanos() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::duration(1)).count();
+}
+
+bool hostClockRepresents(std::int64_t nanos) {
+    return nanos % hostTickNanos() == 0;
+}
+
+// Loads `snapshot`: if the host clock represents `nanos`, the load must
+// succeed and saving it again must reproduce `snapshot` byte-for-byte
+// (`check` inspects the loaded session first); otherwise the load must
+// fail with PersistenceFormatException naming the unrepresentable value.
+template <typename Check>
+void expectExactLoadOrRejection(const std::string& snapshot, std::int64_t nanos, const Check& check) {
+    const ScopedTempFile source(uniqueTempPath("timestamp_source"));
+    writeRawFile(source.path(), snapshot);
+    if (hostClockRepresents(nanos)) {
+        LoadedSession loaded = ledgercore::persistence::load(source.path());
+        check(loaded);
+        const ScopedTempFile resaved(uniqueTempPath("timestamp_resaved"));
+        ledgercore::persistence::save(*loaded.chart, *loaded.ledger, *loaded.computedAccounts, resaved.path());
+        EXPECT_EQ(readRawFile(resaved.path()), snapshot) << nanos;
+    } else {
+        try {
+            ledgercore::persistence::load(source.path());
+            ADD_FAILURE() << "loaded unrepresentable timestamp " << nanos;
+        } catch (const PersistenceFormatException& e) {
+            const std::string message = e.what();
+            EXPECT_NE(message.find(std::to_string(nanos)), std::string::npos) << message;
+            EXPECT_NE(message.find("cannot be represented exactly"), std::string::npos) << message;
+        }
+    }
+}
+
+} // namespace
+
+TEST(SessionStoreTest, EntryDatesLoadExactlyOrAreRejected) {
+    const std::int64_t minNanos = kMinSupportedDateEpochSeconds * 1'000'000'000;
+    const std::int64_t endNanos = kEndOfSupportedDatesEpochSeconds * 1'000'000'000;
+    const std::vector<std::int64_t> dates = {
+        0, 1, -1, 99, -99, 100, -100, 101, -101, 999, -999, 1'000, -1'000, 1'001, -1'001,
+        kNanosPerDayInFile - 1, kNanosPerDayInFile + 1, -kNanosPerDayInFile - 1, -kNanosPerDayInFile + 1,
+        minNanos, minNanos + 1, minNanos + 100, minNanos + 1'000,
+        endNanos - 1, endNanos - 100, endNanos - 1'000,
+    };
+    for (const std::int64_t nanos : dates) {
+        expectExactLoadOrRejection(entryFileWithDate(std::to_string(nanos)), nanos, [nanos](const LoadedSession& loaded) {
+            ASSERT_EQ(loaded.ledger->postedEntries().size(), 1u);
+            EXPECT_EQ(nanosOf(loaded.ledger->postedEntries().front().entry().date()), nanos);
+        });
+    }
+}
+
+TEST(SessionStoreTest, MicrosecondAlignedDatesLoadExactlyOnEveryPlatform) {
+    // Every supported platform's tick divides one microsecond.
+    EXPECT_EQ(1'000 % hostTickNanos(), 0);
+    for (const std::int64_t nanos : {std::int64_t{-1'000}, std::int64_t{1'000}, -kNanosPerDayInFile - 1'000,
+                                     kNanosPerDayInFile - 1'000, std::int64_t{-2'208'988'800'000'000'000},
+                                     std::int64_t{7'258'118'399'999'999'000}}) {
+        ASSERT_TRUE(hostClockRepresents(nanos)) << nanos;
+        expectExactLoadOrRejection(entryFileWithDate(std::to_string(nanos)), nanos, [nanos](const LoadedSession& loaded) {
+            ASSERT_EQ(loaded.ledger->postedEntries().size(), 1u);
+            EXPECT_EQ(nanosOf(loaded.ledger->postedEntries().front().entry().date()), nanos);
+        });
+    }
+}
+
+// The Phase 24 reproduction: 1969-12-31T23:59:59.999999999 used to load on
+// a microsecond clock as exactly 1970-01-01T00:00:00, leaving 1969 and
+// changing as-of and date-range results. It is now either kept exactly
+// (still in 1969) or rejected -- never moved into the next day.
+TEST(SessionStoreTest, PreEpochEntryIsNeverMovedIntoTheNextDay) {
+    using ledgercore::journalquery::JournalQuery;
+    const Period lastDayOf1969(std::chrono::system_clock::time_point{} - std::chrono::hours(24),
+                               std::chrono::system_clock::time_point{});
+    expectExactLoadOrRejection(entryFileWithDate("-1"), -1, [&lastDayOf1969](const LoadedSession& loaded) {
+        ASSERT_EQ(loaded.ledger->postedEntries().size(), 1u);
+        EXPECT_LT(loaded.ledger->postedEntries().front().entry().date(), std::chrono::system_clock::time_point{});
+        EXPECT_EQ(ledgercore::journalquery::findJournalEntries(*loaded.ledger,
+                                                               JournalQuery().withDateRange(lastDayOf1969))
+                      .size(),
+                  1u);
+        const TrialBalance asOfEpoch =
+            TrialBalance::generateAsOf(*loaded.chart, *loaded.ledger, std::chrono::system_clock::time_point{});
+        EXPECT_EQ(asOfEpoch.totalDebits(), Money::fromMajorUnits(1, 0, Currency("USD")));
+    });
+}
+
+TEST(SessionStoreTest, ClosingEntryDatesLoadExactlyOrAreRejected) {
+    const std::int64_t cutoff = nanosOf(day(5));
+    for (const std::int64_t closingNanos : {cutoff - 1'000, cutoff - 1, cutoff - 100, cutoff - 1'001}) {
+        const std::string snapshot = "LEDGERCORE-SNAPSHOT v2\nCURRENCY USD\n"
+                                     "ACCOUNT ROOT 1000 Asset \"Cash\"\n"
+                                     "ACCOUNT ROOT 3100 Equity \"Retained\"\n"
+                                     "ACCOUNT ROOT 4000 Revenue \"Sales\"\n"
+                                     "ENTRY " + std::to_string(nanosOf(day(1))) + " \"Sale\"\n"
+                                     "  DEBIT 1000 100\n  CREDIT 4000 100\n"
+                                     "CLOSING " + std::to_string(closingNanos) + " \"Closing entry\"\n"
+                                     "  DEBIT 4000 100\n  CREDIT 3100 100\n";
+        expectExactLoadOrRejection(snapshot, closingNanos, [closingNanos](const LoadedSession& loaded) {
+            ASSERT_EQ(loaded.ledger->postedEntries().size(), 2u);
+            const JournalEntry& closing = loaded.ledger->postedEntries().back().entry();
+            EXPECT_TRUE(closing.isClosing());
+            EXPECT_EQ(nanosOf(closing.date()), closingNanos);
+            EXPECT_TRUE(loaded.ledger->balance(loaded.chart->findByCode(AccountCode("4000"))->id()).isZero());
+        });
+    }
+}
+
+TEST(SessionStoreTest, PeriodBoundsLoadExactlyOrAreRejected) {
+    const std::int64_t start = nanosOf(day(0));
+    const std::int64_t end = nanosOf(day(100));
+    // Each case perturbs exactly one bound, so that bound decides the outcome.
+    const std::vector<std::pair<std::int64_t, std::int64_t>> bounds = {
+        {start, end}, {start + 1, end}, {start - 1, end}, {start, end - 1}, {start, end + 1},
+        {start + 100, end}, {start, end - 100}, {start + 1'000, end - 1'000},
+    };
+    for (const auto& periodBounds : bounds) {
+        const std::int64_t periodStart = periodBounds.first;
+        const std::int64_t periodEnd = periodBounds.second;
+        const std::int64_t decisive = hostClockRepresents(periodStart) ? periodEnd : periodStart;
+        const std::string snapshot = periodSnapshot("PERIOD " + std::to_string(periodStart) + " "
+                                                    + std::to_string(periodEnd) + " CLOSED\n");
+        expectExactLoadOrRejection(snapshot, decisive, [periodStart, periodEnd](const LoadedSession& loaded) {
+            const auto& periods = loaded.ledger->accountingPeriods();
+            ASSERT_EQ(periods.size(), 1u);
+            EXPECT_EQ(nanosOf(periods.front().period().start()), periodStart);
+            EXPECT_EQ(nanosOf(periods.front().period().end()), periodEnd);
+            EXPECT_TRUE(periods.front().isClosed());
+        });
+    }
+}
