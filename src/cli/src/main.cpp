@@ -391,8 +391,19 @@ int runScript(const std::string& path, LedgerSession& session) {
 } // namespace
 } // namespace ledgercore::cli
 
+#ifndef LEDGERCORE_VERSION
+#error "LEDGERCORE_VERSION must be defined by CMake (the project() version)"
+#endif
+
 int main(int argc, char** argv) {
     try {
+        // Handled before any session exists: prints only the version, so
+        // scripts can consume the output directly.
+        if (argc == 2 && std::string(argv[1]) == "--version") {
+            std::cout << LEDGERCORE_VERSION << "\n";
+            return 0;
+        }
+
         ledgercore::cli::LedgerSession session(ledgercore::domain::Currency("USD"));
 
         if (argc == 1) {
@@ -402,7 +413,7 @@ int main(int argc, char** argv) {
             return ledgercore::cli::runScript(argv[2], session);
         }
 
-        std::cerr << "usage: ledgercore [--script <path>]\n";
+        std::cerr << "usage: ledgercore [--script <path> | --version]\n";
         return 1;
     } catch (const std::exception& e) {
         std::cerr << "internal error: " << e.what() << "\n";

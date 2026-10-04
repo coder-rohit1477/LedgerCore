@@ -89,6 +89,11 @@ file(STRINGS "${package_dir}/LedgerCoreConfigVersion.cmake" version_line REGEX "
 if (NOT version_line MATCHES "\"${EXPECTED_VERSION}\"")
     message(FATAL_ERROR "Package version is not ${EXPECTED_VERSION}: ${version_line}")
 endif()
+# The installed CLI reports the same version as the package.
+run_step("Installed CLI --version" "${relocated_prefix}/bin/ledgercore" --version)
+if (NOT step_output STREQUAL "${EXPECTED_VERSION}\n")
+    message(FATAL_ERROR "Installed ledgercore --version printed '${step_output}', expected ${EXPECTED_VERSION}")
+endif()
 file(GLOB package_files "${package_dir}/*.cmake")
 foreach(package_file IN LISTS package_files)
     file(READ "${package_file}" content)

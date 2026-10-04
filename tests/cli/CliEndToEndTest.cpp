@@ -23,6 +23,9 @@
 #ifndef LEDGERCORE_DEMO_SCRIPT
 #error "LEDGERCORE_DEMO_SCRIPT must be defined by CMake"
 #endif
+#ifndef LEDGERCORE_EXPECTED_VERSION
+#error "LEDGERCORE_EXPECTED_VERSION must be defined by CMake"
+#endif
 
 namespace {
 
@@ -93,6 +96,25 @@ RunResult runRepl(const std::string& input) {
     std::remove(inputPath.c_str());
     return result;
 }
+
+// Runs the CLI binary with `arguments` (already shell-quoted as needed) and
+// stdin redirected from a temp file holding `input`, capturing combined
+// stdout+stderr and the exit code.
+RunResult runWithArguments(const std::string& arguments, const std::string& input = "") {
+    const std::string inputPath = uniqueTempPath("args_input");
+    {
+        std::ofstream out(inputPath);
+        out << input;
+    }
+
+    const RunResult result =
+        runCommand(std::string("\"") + LEDGERCORE_CLI_PATH + "\" " + arguments + " < \"" + inputPath + "\" 2>&1");
+
+    std::remove(inputPath.c_str());
+    return result;
+}
+
+const std::string kUsageLine = "usage: ledgercore [--script <path> | --version]\n";
 
 } // namespace
 
@@ -836,4 +858,41 @@ TEST(CliEndToEndTest, ReadmeDemoScriptRunsAndItsReloadedSessionSavesIdentically)
     EXPECT_EQ(trialBalanceAt(beforeSave), trialBalanceAt(afterLoad));
     EXPECT_NE(trialBalanceAt(afterLoad).find("3100      RetainedEarnings                  0.00 USD        450.00 USD"),
               std::string::npos);
+}
+
+// --version prints exactly the CMake project() version and exits 0 before
+// any session or REPL starts: the commands waiting on stdin are never read
+// (no banner, no prompt, no command output).
+TEST(CliEndToEndTest, VersionFlagPrintsOnlyTheProjectVersionAndExitsWithoutStartingTheRepl) {
+    const RunResult result = runWithArguments(
+        "--version", "account create-root --code 1000 --name Cash --type asset\nformula eval 1 + 1\n");
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_EQ(result.output, std::string(LEDGERCORE_EXPECTED_VERSION) + "\n");
+}
+
+// The only accepted invocations are still exactly: no arguments, --script
+// <path>, or --version. Anything else -- including --version combined with
+// other arguments -- is a usage error (exit 1).
+TEST(CliEndToEndTest, VersionCombinedWithOtherArgumentsIsAUsageError) {
+    for (const std::string arguments : {"--version extra", "--version --script x.txt", "--script x.txt --version"}) {
+        const RunResult result = runWithArguments(arguments);
+        EXPECT_EQ(result.exitCode, 1) << arguments;
+        EXPECT_EQ(result.output, kUsageLine) << arguments;
+    }
+}
+
+TEST(CliEndToEndTest, UnknownOptionIsAUsageErrorAndStartsNoSession) {
+    for (const std::string arguments : {"--bogus", "-v", "--VERSION", "--script"}) {
+        const RunResult result = runWithArguments(arguments, "formula eval 1 + 1\n");
+        EXPECT_EQ(result.exitCode, 1) << arguments;
+        EXPECT_EQ(result.output, kUsageLine) << arguments;
+    }
+}
+
+// --version is a process option, not a session command: inside a script it
+// is an unknown command like any other.
+TEST(CliEndToEndTest, VersionInsideAScriptIsAnUnknownCommand) {
+    const RunResult result = runScript("--version\n");
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_NE(result.output.find("unknown command: '--version'"), std::string::npos) << result.output;
 }

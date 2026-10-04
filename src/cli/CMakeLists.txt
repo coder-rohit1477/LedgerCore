@@ -8,8 +8,13 @@ add_executable(ledgercore_cli
 
 set_target_properties(ledgercore_cli PROPERTIES OUTPUT_NAME ledgercore)
 
-# `cmake --install` installs the ledgercore executable. The libraries are
-# consumed in-tree (add_subdirectory()/FetchContent); see README.
+# `ledgercore --version` prints the project() version; this definition is
+# its only source, so the CLI cannot drift from the CMake/package version.
+target_compile_definitions(ledgercore_cli PRIVATE LEDGERCORE_VERSION="${PROJECT_VERSION}")
+
+# `cmake --install` installs the ledgercore executable. The engine libraries
+# are installed separately, as the LedgerCore CMake package
+# (cmake/LedgerCorePackage.cmake).
 install(TARGETS ledgercore_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # domain, ledger, formula, and trialbalance are deliberately not listed

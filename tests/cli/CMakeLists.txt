@@ -66,6 +66,7 @@ target_compile_definitions(ledgercore_cli_e2e_tests
     PRIVATE
         LEDGERCORE_CLI_PATH="$<TARGET_FILE:ledgercore_cli>"
         LEDGERCORE_DEMO_SCRIPT="${PROJECT_SOURCE_DIR}/examples/demo.txt"
+        LEDGERCORE_EXPECTED_VERSION="${PROJECT_VERSION}"
 )
 
 add_dependencies(ledgercore_cli_e2e_tests ledgercore_cli)
