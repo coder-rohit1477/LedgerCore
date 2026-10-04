@@ -26,3 +26,12 @@ else()
         -Wformat=2
     )
 endif()
+
+# Applies the same warning policy to an installable library as PRIVATE
+# compile options. Those libraries do not link ledgercore_warnings: CMake
+# records a static library's private link dependencies in its exported link
+# interface, which would make the LedgerCore package depend on this
+# build-only target.
+function(ledgercore_target_warnings target)
+    target_compile_options(${target} PRIVATE $<TARGET_PROPERTY:ledgercore_warnings,INTERFACE_COMPILE_OPTIONS>)
+endfunction()

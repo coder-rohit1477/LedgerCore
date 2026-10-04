@@ -41,3 +41,9 @@ add_subdirectory(journalquery)
 add_subdirectory(persistence)
 add_subdirectory(exceptionsafety)
 add_subdirectory(cli)
+
+# Package tests need the install rules, which exist only with
+# LEDGERCORE_INSTALL.
+if (LEDGERCORE_INSTALL)
+    add_subdirectory(package)
+endif()

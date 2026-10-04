@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+# LedgerCore has no external dependencies: the exported targets need only
+# the C++17 standard library.
+include("${CMAKE_CURRENT_LIST_DIR}/LedgerCoreTargets.cmake")
+
+check_required_components(LedgerCore)

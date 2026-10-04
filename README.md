@@ -26,7 +26,7 @@ Each item below is backed by the test suite or CI in this repository unless mark
 - **Exception safety.** Posting, closing, adding accounts, and defining computed accounts are all-or-nothing. A dedicated test binary replaces the global allocator and re-runs each operation with every one of its allocations failing in turn, checking that no observable state changed.
 - **Persistence through the front door.** Loading a snapshot rebuilds the session by replaying every journal entry through `posting::post`, so a hand-edited file is held to exactly the rules live callers are; a failed load never yields a partial session.
 - **Bounded adversarial input.** Explicit limits on chart depth, formula depth, computed-evaluation depth, and closing-entry count (see [Resource Limits](#resource-limits-and-complexity)) turn hostile snapshots and formulas into ordinary errors instead of unbounded recursion or quadratic hangs.
-- **Verification.** 734 tests. CI on every push: GCC 13 `Release`; GCC `Debug` with AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer; clang-tidy 18 with any finding fatal. The same suite is also run locally on macOS with AppleClang, in `Release` and under ASan/UBSan. Project targets build with zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`.
+- **Verification.** 736 tests, including two that build and run an external project against the installed (and relocated) CMake package. CI on every push: GCC 13 `Release`; GCC `Debug` with AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer; clang-tidy 18 with any finding fatal. The same suite is also run locally on macOS with AppleClang, in `Release` and under ASan/UBSan. Project targets build with zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`.
 
 Measured performance (one machine — Apple M5, 16 GB, AppleClang 21, `Release` — using an ad-hoc timing harness that is not part of this repository; indicative only, not a guarantee):
 
@@ -356,7 +356,7 @@ These limits bound recursion depth and time, **not total memory**: input size it
 
 ## 9. Testing
 
-**734 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
+**736 tests**, all passing: 734 GoogleTest cases, organized as one executable per module (two for the CLI) plus a single smoke test, and 2 CMake package tests.
 
 | Module | Tests |
 |---|---|
@@ -373,6 +373,7 @@ These limits bound recursion depth and time, **not total memory**: input size it
 | exception safety (allocation-failure injection) | 5 |
 | cli (input parsing, command parsing, session, process-level end-to-end, the demo script) | 121 |
 | smoke | 1 |
+| package (an external `find_package` consumer: relocated install tree, and build tree) | 2 |
 
 The suite mixes unit, integration, and property-style tests, targeted at the invariants the domain actually cares about rather than at raw line coverage:
 
@@ -420,13 +421,52 @@ Build options:
 |---|---|---|
 | `LEDGERCORE_BUILD_TESTS` | `ON` when LedgerCore is the top-level project, `OFF` when included by another project | builds the test suite (and fetches GoogleTest) |
 | `LEDGERCORE_SANITIZE` | `OFF` | builds everything with ASan + UBSan |
+| `LEDGERCORE_INSTALL` | `ON` when LedgerCore is the top-level project, `OFF` when included by another project | installs the engine library as the `LedgerCore` CMake package |
 
-`cmake --install build` installs the `ledgercore` executable (to `bin/` under the install prefix). The engine libraries are not installed or exported as a CMake package; a C++ project uses them in-tree, linking the module targets it needs (each one carries its own include path and dependencies):
+### Using LedgerCore as a Library
+
+The engine is one CMake target, **`LedgerCore::ledgercore`**: all ten module libraries, their public headers (`#include "ledgercore/<module>/<Header>.h"`), and the C++17 requirement. It has no external dependencies, and it contains no CLI code — the `ledgercore` executable is a separate target that library users never link. (The installable package is on `main` after the `v1.0.1` tag; it is not yet part of a tagged release.)
+
+**Installed package.** `cmake --install` places the headers, the static libraries, and a relocatable CMake package under the prefix (plus the `ledgercore` executable in `bin/`):
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+cmake --install build --prefix /opt/ledgercore
+```
+
+```
+/opt/ledgercore/
+├── bin/ledgercore
+├── include/ledgercore/<module>/*.h
+└── lib/
+    ├── libledgercore_<module>.a                 (10 module libraries)
+    └── cmake/LedgerCore/                        LedgerCoreConfig.cmake, LedgerCoreConfigVersion.cmake,
+                                                 LedgerCoreTargets.cmake, LedgerCoreTargets-<config>.cmake
+```
 
 ```cmake
-add_subdirectory(LedgerCore)   # or FetchContent; tests are off by default here
-target_link_libraries(my_app PRIVATE ledgercore_posting ledgercore_reporting)
+find_package(LedgerCore 1.0 CONFIG REQUIRED)    # e.g. with -DCMAKE_PREFIX_PATH=/opt/ledgercore
+target_link_libraries(my_app PRIVATE LedgerCore::ledgercore)
 ```
+
+```cpp
+#include "ledgercore/domain/ChartOfAccounts.h"
+#include "ledgercore/ledger/Ledger.h"
+#include "ledgercore/posting/PostingEngine.h"
+#include "ledgercore/trialbalance/TrialBalance.h"
+```
+
+The package version comes from `project()`, with same-major-version compatibility (a request for `1.0` accepts any 1.x; `2.0` is rejected). The installed tree contains no absolute paths, so it can be copied or moved; [`tests/package/`](tests/package) verifies this by installing, moving the tree, then building and running an external consumer against it. A LedgerCore build directory can also be used without installing, via `-DLedgerCore_DIR=<build-dir>`.
+
+**In-tree.** `add_subdirectory()` or `FetchContent` provides the same `LedgerCore::ledgercore` target (and the individual `ledgercore_<module>` targets) without installing anything; tests, the GoogleTest download, and install rules are off by default in this mode:
+
+```cmake
+add_subdirectory(LedgerCore)
+target_link_libraries(my_app PRIVATE LedgerCore::ledgercore)
+```
+
+The libraries are static. Building them into a shared library needs position-independent code (`-DCMAKE_POSITION_INDEPENDENT_CODE=ON` when building LedgerCore).
 
 Journal entry dates are supported from 1900-01-01 up to (not including) 2200-01-01 UTC — the range the snapshot format's nanosecond timestamps can represent with margin. The CLI and persistence reject dates outside it rather than clamping them.
 
@@ -536,6 +576,8 @@ LedgerCore/
 │   └── ci.yml
 ├── cmake/
 │   ├── CompilerWarnings.cmake
+│   ├── LedgerCoreConfig.cmake.in
+│   ├── LedgerCorePackage.cmake
 │   └── Sanitizers.cmake
 ├── examples/
 │   └── demo.txt
@@ -564,6 +606,7 @@ LedgerCore/
 │   ├── persistence/
 │   ├── exceptionsafety/
 │   ├── cli/
+│   ├── package/
 │   └── smoke_test.cpp
 ├── .clang-tidy
 ├── CMakeLists.txt
@@ -592,7 +635,7 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 - **Accounting periods cannot be reopened** (`Open → Closed` is one-way).
 - **At most 1,000 closing entries per ledger.** Closing validation replays history, and the cap bounds that cost; it is a limit, not an incremental algorithm.
 - **Memory is not bounded.** The resource limits bound recursion and time, not input size (see [Resource Limits](#resource-limits-and-complexity)).
-- **Libraries are consumed in-tree only.** `cmake --install` installs only the CLI; there is no exported CMake package.
+- **Static libraries only, no prebuilt binaries.** LedgerCore is built from source with CMake; there is no shared-library build option and no package-manager (vcpkg/Conan) recipe.
 - **Linux and macOS only.** Windows is not supported; the end-to-end test harness uses POSIX APIs.
 - **No `--version` flag.** The version is defined once, in the top-level `CMakeLists.txt` `project()` call, and stated in this README.
 - **No coverage measurement**, so no coverage percentage is claimed.
@@ -601,7 +644,7 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 Version **1.0.1**, tagged `v1.0.1` (identical in behaviour to `v1.0.0`; adds the license). Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
-- 734 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
+- 736 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 
@@ -612,7 +655,6 @@ This is not a claim of production readiness — see [Overview](#1-overview).
 Reasonable, currently-unimplemented future work:
 
 - Reopening a closed accounting period (deliberately unsupported today: `Open → Closed` is one-way)
-- Installing and exporting the engine libraries as a CMake package (today they are consumed in-tree)
 - Windows support (the engine is portable C++17; the end-to-end test harness is POSIX-only)
 - A `ledgercore --version` flag reporting the CMake project version
 - Incremental closing-entry validation, which would remove the need for the closing-entry cap

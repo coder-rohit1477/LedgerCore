@@ -4,7 +4,7 @@ add_library(ledgercore_persistence STATIC
 
 target_include_directories(ledgercore_persistence
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
 target_link_libraries(ledgercore_persistence
@@ -13,6 +13,6 @@ target_link_libraries(ledgercore_persistence
         ledgercore_ledger
         ledgercore_posting
         ledgercore_computed
-    PRIVATE
-        ledgercore_warnings
 )
+
+ledgercore_target_warnings(ledgercore_persistence)

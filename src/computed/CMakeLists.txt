@@ -6,7 +6,7 @@ add_library(ledgercore_computed STATIC
 
 target_include_directories(ledgercore_computed
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
 target_link_libraries(ledgercore_computed
@@ -14,6 +14,6 @@ target_link_libraries(ledgercore_computed
         ledgercore_domain
         ledgercore_ledger
         ledgercore_formula
-    PRIVATE
-        ledgercore_warnings
 )
+
+ledgercore_target_warnings(ledgercore_computed)

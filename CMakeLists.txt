@@ -21,13 +21,23 @@ include(cmake/Sanitizers.cmake)
 # LedgerCore in with add_subdirectory()/FetchContent gets just the libraries
 # and the CLI.
 if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-    set(LEDGERCORE_BUILD_TESTS_DEFAULT ON)
+    set(LEDGERCORE_IS_TOP_LEVEL ON)
 else()
-    set(LEDGERCORE_BUILD_TESTS_DEFAULT OFF)
+    set(LEDGERCORE_IS_TOP_LEVEL OFF)
 endif()
-option(LEDGERCORE_BUILD_TESTS "Build the LedgerCore test suite (fetches GoogleTest)" ${LEDGERCORE_BUILD_TESTS_DEFAULT})
+option(LEDGERCORE_BUILD_TESTS "Build the LedgerCore test suite (fetches GoogleTest)" ${LEDGERCORE_IS_TOP_LEVEL})
+
+# Install/export the engine library as the LedgerCore CMake package. On by
+# default only for a top-level build, so a parent project that uses
+# LedgerCore in-tree does not install LedgerCore's headers and libraries
+# into its own prefix.
+option(LEDGERCORE_INSTALL "Install the LedgerCore library as a CMake package" ${LEDGERCORE_IS_TOP_LEVEL})
 
 add_subdirectory(src)
+
+if (LEDGERCORE_INSTALL)
+    include(cmake/LedgerCorePackage.cmake)
+endif()
 
 if (LEDGERCORE_BUILD_TESTS)
     enable_testing()

@@ -4,7 +4,7 @@ add_library(ledgercore_closing STATIC
 
 target_include_directories(ledgercore_closing
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
 # closing sits above both posting (it posts through posting::post) and
@@ -16,6 +16,6 @@ target_link_libraries(ledgercore_closing
         ledgercore_ledger
         ledgercore_posting
         ledgercore_trialbalance
-    PRIVATE
-        ledgercore_warnings
 )
+
+ledgercore_target_warnings(ledgercore_closing)
