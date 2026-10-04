@@ -14,7 +14,7 @@ The domain/ledger/posting/trialbalance/formula/computed/reporting core has no de
 
 This is a systems-design and testing-focused portfolio project. It is **not** production banking or accounting software, and makes no claim to regulatory compliance, multi-currency conversion, tax handling, or any other capability real accounting software would require.
 
-**Status:** version 1.0.0 (git tag `v1.0.0`). The public engine APIs, the CLI command set, and the snapshot formats `v1`–`v3` are considered stable as of 1.0. To see the whole system in a few minutes, build it and run the [demo walkthrough](#11-demo-walkthrough).
+**Status:** version 1.0.1 (git tag `v1.0.1`; 1.0.1 adds the MIT license to the 1.0.0 release and changes no code). Released under the [MIT License](LICENSE). The public engine APIs, the CLI command set, and the snapshot formats `v1`–`v3` are considered stable as of 1.0. To see the whole system in a few minutes, build it and run the [demo walkthrough](#11-demo-walkthrough).
 
 ## 2. Engineering Highlights
 
@@ -567,6 +567,7 @@ LedgerCore/
 │   └── smoke_test.cpp
 ├── .clang-tidy
 ├── CMakeLists.txt
+├── LICENSE
 └── README.md
 ```
 
@@ -595,11 +596,10 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 - **Linux and macOS only.** Windows is not supported; the end-to-end test harness uses POSIX APIs.
 - **No `--version` flag.** The version is defined once, in the top-level `CMakeLists.txt` `project()` call, and stated in this README.
 - **No coverage measurement**, so no coverage percentage is claimed.
-- **No license file yet** (see [License](#17-license)).
 
 ## 15. Current Status
 
-Version **1.0.0**, tagged `v1.0.0`. Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
+Version **1.0.1**, tagged `v1.0.1` (identical in behaviour to `v1.0.0`; adds the license). Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
 - 734 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
@@ -625,4 +625,4 @@ None of the above is implemented today.
 
 ## 17. License
 
-This repository does not currently include a `LICENSE` file. No license is claimed or implied here; treat the source as all-rights-reserved until a license file is added.
+LedgerCore is released under the MIT License. See [`LICENSE`](LICENSE) for the full text.
