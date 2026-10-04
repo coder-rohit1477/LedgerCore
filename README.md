@@ -14,7 +14,7 @@ The domain/ledger/posting/trialbalance/formula/computed/reporting core has no de
 
 This is a systems-design and testing-focused portfolio project. It is **not** production banking or accounting software, and makes no claim to regulatory compliance, multi-currency conversion, tax handling, or any other capability real accounting software would require.
 
-**Status:** version 1.0.1 (git tag `v1.0.1`; 1.0.1 adds the MIT license to the 1.0.0 release and changes no code). Released under the [MIT License](LICENSE). The public engine APIs, the CLI command set, and the snapshot formats `v1`–`v3` are considered stable as of 1.0. To see the whole system in a few minutes, build it and run the [demo walkthrough](#11-demo-walkthrough).
+**Status:** version 1.1.0 (git tag `v1.1.0`). 1.1.0 adds the installable, exported CMake package — `find_package(LedgerCore CONFIG REQUIRED)` and `LedgerCore::ledgercore` ([Using LedgerCore as a Library](#using-ledgercore-as-a-library)) — with no change to engine behaviour, public APIs, or the snapshot format. Released under the [MIT License](LICENSE). The public engine APIs, the CLI command set, and the snapshot formats `v1`–`v3` are considered stable as of 1.0. To see the whole system in a few minutes, build it and run the [demo walkthrough](#11-demo-walkthrough).
 
 ## 2. Engineering Highlights
 
@@ -425,7 +425,7 @@ Build options:
 
 ### Using LedgerCore as a Library
 
-The engine is one CMake target, **`LedgerCore::ledgercore`**: all ten module libraries, their public headers (`#include "ledgercore/<module>/<Header>.h"`), and the C++17 requirement. It has no external dependencies, and it contains no CLI code — the `ledgercore` executable is a separate target that library users never link. (The installable package is on `main` after the `v1.0.1` tag; it is not yet part of a tagged release.)
+The engine is one CMake target, **`LedgerCore::ledgercore`**: all ten module libraries, their public headers (`#include "ledgercore/<module>/<Header>.h"`), and the C++17 requirement. It has no external dependencies, and it contains no CLI code — the `ledgercore` executable is a separate target that library users never link. The installable package is available from version 1.1.0.
 
 **Installed package.** `cmake --install` places the headers, the static libraries, and a relocatable CMake package under the prefix (plus the `ledgercore` executable in `bin/`):
 
@@ -446,7 +446,7 @@ cmake --install build --prefix /opt/ledgercore
 ```
 
 ```cmake
-find_package(LedgerCore 1.0 CONFIG REQUIRED)    # e.g. with -DCMAKE_PREFIX_PATH=/opt/ledgercore
+find_package(LedgerCore 1.1 CONFIG REQUIRED)    # e.g. with -DCMAKE_PREFIX_PATH=/opt/ledgercore
 target_link_libraries(my_app PRIVATE LedgerCore::ledgercore)
 ```
 
@@ -457,7 +457,7 @@ target_link_libraries(my_app PRIVATE LedgerCore::ledgercore)
 #include "ledgercore/trialbalance/TrialBalance.h"
 ```
 
-The package version comes from `project()`, with same-major-version compatibility (a request for `1.0` accepts any 1.x; `2.0` is rejected). The installed tree contains no absolute paths, so it can be copied or moved; [`tests/package/`](tests/package) verifies this by installing, moving the tree, then building and running an external consumer against it. A LedgerCore build directory can also be used without installing, via `-DLedgerCore_DIR=<build-dir>`.
+The package version comes from `project()`, with same-major-version compatibility: version 1.1.0 satisfies a request for `1.0` or `1.1`, but not `1.2` or `2.0`. The installed tree contains no absolute paths, so it can be copied or moved; [`tests/package/`](tests/package) verifies this by installing, moving the tree, then building and running an external consumer against it. A LedgerCore build directory can also be used without installing, via `-DLedgerCore_DIR=<build-dir>`.
 
 **In-tree.** `add_subdirectory()` or `FetchContent` provides the same `LedgerCore::ledgercore` target (and the individual `ledgercore_<module>` targets) without installing anything; tests, the GoogleTest download, and install rules are off by default in this mode:
 
@@ -642,7 +642,7 @@ Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `inclu
 
 ## 15. Current Status
 
-Version **1.0.1**, tagged `v1.0.1` (identical in behaviour to `v1.0.0`; adds the license). Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
+Version **1.1.0**, tagged `v1.1.0` (adds the installable CMake package; engine behaviour is identical to `v1.0.0`/`v1.0.1`). Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
 
 - 736 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)

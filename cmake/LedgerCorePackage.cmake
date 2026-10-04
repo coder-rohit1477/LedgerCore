@@ -1,6 +1,6 @@
 # Installable, relocatable CMake package for the LedgerCore engine library:
 #
-#   find_package(LedgerCore 1.0 CONFIG REQUIRED)
+#   find_package(LedgerCore 1.1 CONFIG REQUIRED)
 #   target_link_libraries(my_app PRIVATE LedgerCore::ledgercore)
 #
 # Installed layout (relative to the install prefix):
