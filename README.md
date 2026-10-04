@@ -14,7 +14,34 @@ The domain/ledger/posting/trialbalance/formula/computed/reporting core has no de
 
 This is a systems-design and testing-focused portfolio project. It is **not** production banking or accounting software, and makes no claim to regulatory compliance, multi-currency conversion, tax handling, or any other capability real accounting software would require.
 
-## 2. Key Features
+**Status:** version 1.0.0 (git tag `v1.0.0`). The public engine APIs, the CLI command set, and the snapshot formats `v1`–`v3` are considered stable as of 1.0. To see the whole system in a few minutes, build it and run the [demo walkthrough](#11-demo-walkthrough).
+
+## 2. Engineering Highlights
+
+Each item below is backed by the test suite or CI in this repository unless marked as a measurement.
+
+- **Exact money.** `Money` is `std::int64_t` minor units, never floating point; every arithmetic operation is overflow-checked before it executes, including `INT64_MIN` negation. Formulas use exact `Rational` arithmetic.
+- **Double-entry invariants.** A `JournalEntry` cannot be constructed unbalanced; `posting::post` is the only way to change a `Ledger` and validates everything before mutating anything; every generated Trial Balance verifies `totalDebits == totalCredits`; the Balance Sheet identity is checked across randomized posting sequences.
+- **Determinism.** Reports are ordered by account code, never by hash-map order; save → load → save is byte-identical (tested, and checked again by the demo); a closing entry's timestamp is persisted identically on every platform.
+- **Exception safety.** Posting, closing, adding accounts, and defining computed accounts are all-or-nothing. A dedicated test binary replaces the global allocator and re-runs each operation with every one of its allocations failing in turn, checking that no observable state changed.
+- **Persistence through the front door.** Loading a snapshot rebuilds the session by replaying every journal entry through `posting::post`, so a hand-edited file is held to exactly the rules live callers are; a failed load never yields a partial session.
+- **Bounded adversarial input.** Explicit limits on chart depth, formula depth, computed-evaluation depth, and closing-entry count (see [Resource Limits](#resource-limits-and-complexity)) turn hostile snapshots and formulas into ordinary errors instead of unbounded recursion or quadratic hangs.
+- **Verification.** 734 tests. CI on every push: GCC 13 `Release`; GCC `Debug` with AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer; clang-tidy 18 with any finding fatal. The same suite is also run locally on macOS with AppleClang, in `Release` and under ASan/UBSan. Project targets build with zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`.
+
+Measured performance (one machine — Apple M5, 16 GB, AppleClang 21, `Release` — using an ad-hoc timing harness that is not part of this repository; indicative only, not a guarantee):
+
+| Workload | Time |
+|---|---|
+| Post 1,000,000 two-line entries | ~0.25 s |
+| As-of Trial Balance over those 1M entries (full replay) | ~11–16 ms |
+| Journal query by account over 1M entries | ~17 ms |
+| Save the 1M-entry session (65 MB snapshot) / load it (full replay through posting) | ~0.2 s / ~0.62 s |
+| Chart of 100,000 leaf accounts: Trial Balance / load | ~13 ms / ~26 ms |
+| 100,000 entries with 1,000 closing entries: post / load | ~1.25 s / ~0.52 s |
+| 5.3 MB snapshot of 40,000 alternating closing entries (adversarial) | rejected in < 0.05 s at the closing-entry cap |
+| Account tree 100,000 levels deep (adversarial) | rejected at depth 1,001 |
+
+## 3. Key Features
 
 ### Accounting Domain
 - Chart of Accounts with hierarchical (tree) accounts
@@ -61,7 +88,7 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Overflow checking throughout
 - Deterministic evaluation given the same AST and resolver
 - Bounded nesting (`formula::kMaxFormulaDepth`, 128 levels), so adversarially deep input fails with a syntax error instead of exhausting the stack
-- Documented reference grammar: `-` and `.` are valid account-code characters, so `#1000-1` names account `1000-1`; subtraction after a reference needs whitespace (`#1000 - 1`) — see [§7](#7-formula--computed-account-example)
+- Documented reference grammar: `-` and `.` are valid account-code characters, so `#1000-1` names account `1000-1`; subtraction after a reference needs whitespace (`#1000 - 1`) — see [§8](#8-formula--computed-account-example)
 
 ### Computed Accounts
 - `@name`-style computed-account references, resolved against a registry
@@ -78,7 +105,7 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Accounting-equation correctness verified by tests across randomized posting sequences
 
 ### Closing Entries & Retained Earnings
-- `closing::closeTemporaryAccounts` closes every Revenue and Expense balance into a designated Equity (retained-earnings) account through one balanced closing journal entry, posted through `posting::post` — see [§5](#closing-entries-and-retained-earnings)
+- `closing::closeTemporaryAccounts` closes every Revenue and Expense balance into a designated Equity (retained-earnings) account through one balanced closing journal entry, posted through `posting::post` — see [§6](#closing-entries-and-retained-earnings)
 - Invalid targets (non-Equity, group, unknown) and empty closes are rejected before the Ledger is touched
 - Repeated closing is decided by the journal itself — no hidden "closed" flag
 
@@ -86,11 +113,11 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Accounting periods are `[start, end)` business-date ranges owned by the `Ledger`, with a one-way `Open → Closed` lifecycle
 - `posting::post` rejects any entry — standard or closing — whose business date falls inside a closed period, before touching the Ledger
 - Overlapping or duplicate periods are rejected; adjacent periods and gaps are allowed
-- Locking never changes a balance, a posted entry, or any report — see [§6](#accounting-periods-and-period-locking)
+- Locking never changes a balance, a posted entry, or any report — see [§7](#accounting-periods-and-period-locking)
 
 ### Journal History Queries
 - `journalquery::findJournalEntries(ledger, query)` returns posted journal entries matching an immutable `JournalQuery`: business-date range (`[start, end)`), account involvement (any debit or credit line), and kind (all / standard only / closing only), combined with AND
-- Results keep the Ledger's posting order and are lifetime-safe copies; querying is read-only — see [§6](#journal-history-queries-1)
+- Results keep the Ledger's posting order and are lifetime-safe copies; querying is read-only — see [§7](#journal-history-queries-1)
 
 ### Persistence
 - Versioned, deterministic, line-oriented text snapshot: `LEDGERCORE-SNAPSHOT v1`, `v2` when it contains a closing entry, `v3` when it defines accounting periods — always the lowest version that can represent the session
@@ -115,57 +142,48 @@ This is a systems-design and testing-focused portfolio project. It is **not** pr
 - Business-date-based `JournalEntry` filtering — never posting order
 - A whole `JournalEntry` is included or excluded as one unit; its lines are never split across a boundary
 
-## 3. Architecture
+## 4. Architecture
+
+Modules form strict layers; each one depends only on modules in lower rows (arrows may skip rows), and every module also uses `domain` directly:
 
 ```
-                              ┌─────────────────┐
-                              │    Reporting    │
-                              │ (Balance Sheet,  │
-                              │ Income Statement)│
-                              └────────┬─────────┘
-                                       │ uses
-                                       ▼
-┌────────────────┐   ┌─────────────────────────┐   ┌─────────────────┐
-│     Posting     │   │      Trial Balance       │   │     Computed     │
-│  (validate then  │   │ (cumulative / as-of /   │   │ (@name formula   │
-│   commit)        │   │  period snapshots)      │   │  accounts)       │
-└────────┬─────────┘   └────────────┬────────────┘   └────────┬─────────┘
-         │ uses                     │ uses                     │ uses
-         ▼                          ▼                          ▼
-┌──────────────────────────────────────────┐          ┌─────────────────┐
-│                   Ledger                   │          │     Formula      │
-│  (posted-state truth: balances + history)  │          │ (lexer / parser /│
-└──────────────────────┬─────────────────────┘          │  AST / evaluator)│
-                        │ uses                            └────────┬─────────┘
-                        ▼                                          │ uses
-┌────────────────────────────────────────────────────────────────▼─────────┐
-│                                     Domain                                  │
-│   Account · ChartOfAccounts · Money · Currency · JournalEntry · Period ·   │
-│         NormalBalance (isDebitNormal / signedEffect / debitCreditPresentation) │
-└──────────────────────────────────────────────────────────────────────────┘
+ cli            the ledgercore executable: REPL / --script, parsing, formatting
+  │
+ persistence    versioned snapshot save/load ─► posting, computed
+  │
+ reporting · closing · computed · journalquery
+  │   reporting    ─► trialbalance        (Balance Sheet, Income Statement)
+  │   closing      ─► posting, trialbalance (closing entries into retained earnings)
+  │   computed     ─► ledger, formula     (@name accounts; read-only)
+  │   journalquery ─► ledger              (journal history queries)
+  │
+ posting · trialbalance · formula
+  │   posting      ─► ledger              (the only way to mutate a Ledger)
+  │   trialbalance ─► ledger              (cumulative / as-of / period projections)
+  │   formula      ─► domain              (lexer, parser, AST, exact evaluator)
+  │
+ ledger         posted-state truth: balances, journal history, accounting periods
+  │
+ domain         Account, ChartOfAccounts, Money, Currency, JournalEntry, Period, NormalBalance
 ```
 
-Every module above also depends directly on **Domain** for its core value types (`Money`, `AccountId`, `Currency`, ...) in addition to the arrows shown; Domain itself depends on nothing but the C++ standard library. `Computed` depends directly on both `Ledger` (to resolve real `#code` balances) and `Formula` (to parse and evaluate `@name` formulas).
+`domain` depends on nothing but the C++ standard library, and a lower layer never depends on, includes, or links against a higher one. The only upward *names* are two forward-declared `friend` grants used for access control: `Ledger` admits only `posting::post` to mutate it, and `ChartOfAccounts` admits only `posting::addChildAccount` to attach child accounts. Neither includes a higher-layer header or links a higher-layer library. This graph is verified against the CMake target links and the `#include` graph, not assumed from design intent.
 
-This is dependency inversion applied literally: every arrow points toward `Domain`, never away from it. Higher layers may depend on lower ones; a lower layer never depends on, includes, or links against a higher one. The only upward *names* are two forward-declared `friend` grants used for access control: `Ledger` admits only `posting::post` to mutate it, and `ChartOfAccounts` admits only `posting::addChildAccount` to attach child accounts. Neither includes a higher-layer header or links a higher-layer library. This graph is verified directly against the CMake target dependencies and the `#include` graph, not assumed from design intent.
+Why the layers look this way:
 
-Two application-facing layers sit above the engine core:
-
-```
-cli (ledgercore executable) ──► persistence ──► posting, computed (──► ledger, formula, domain)
-            │
-            ├─────────────────► closing ──► posting, trialbalance (──► ledger, domain)
-            │
-            ├─────────────────► journalquery ──► ledger (──► domain)
-            │
-            └─────────────────► reporting ──► trialbalance (──► ledger, domain)
-```
+- **`posting` is the single mutation choke point.** Every balance change — live, from `closing`, or replayed by `persistence` — goes through `posting::post`, which runs every check before changing anything. Ledger-level rules (known leaf accounts only, matching currency, period locks, closing-entry completeness) are enforced in one place and cannot be bypassed; balance itself is guaranteed earlier, since an unbalanced `JournalEntry` cannot be constructed.
+- **`domain::NormalBalance` is the only sign authority.** `isDebitNormal` / `signedEffect` / `debitCreditPresentation` define debit/credit polarity once; `posting`, `trialbalance`, `reporting`, and `closing` all reuse them, and computed `#code` references read the balances they produced.
+- **`persistence` reconstructs state through normal posting.** A snapshot stores the chart, journal history, accounting periods, and computed definitions — never balances. Loading replays history through the public APIs, so balances are always re-derived and a hand-edited file faces the same rules as a live caller.
+- **Reports consume trial-balance state.** Balance Sheet and Income Statement are built from an already-generated `TrialBalance`, so every report agrees with the trial balance it came from; nothing is cached.
+- **Computed accounts are read-only.** They resolve `#code` balances from the `Ledger` and never post; the formula engine sees only two narrow resolver interfaces.
+- **Journal queries return copies.** Results stay valid after later postings and cannot be used to alter history.
+- **Resource limits sit at the input boundaries** — chart construction, formula parsing, computed evaluation, and closing-entry posting — the places a snapshot or formula can drive unbounded recursion or work (see [Resource Limits](#resource-limits-and-complexity)).
 
 `closing` is its own module because it needs both `posting` (to post the closing entry) and `trialbalance` (to read as-of balances), and `posting` must not depend on `trialbalance`.
 
 `persistence` reconstructs a session only through the engine's public APIs (chart construction, `posting::addChildAccount`, `JournalEntry::create`, `posting::post`, `ComputedAccountRegistry::define`). `cli` owns one session (chart, ledger, computed registry) and translates text commands into those same APIs.
 
-## 4. Module Responsibilities
+## 5. Module Responsibilities
 
 | Module | Responsibility | Dependencies |
 |---|---|---|
@@ -181,7 +199,7 @@ cli (ledgercore executable) ──► persistence ──► posting, computed (�
 | `persistence` | Versioned text snapshot save/load of a whole session (chart, journal history, computed definitions, accounting periods), replaying history through `posting` | `domain`, `ledger`, `posting`, `computed`, `formula` |
 | `cli` | The `ledgercore` executable: REPL and `--script` modes, input parsing, report formatting, session ownership | `persistence`, `reporting` (and the rest transitively) |
 
-## 5. Accounting Model
+## 6. Accounting Model
 
 Each `AccountType` has a normal balance side — the side on which activity increases that account's balance:
 
@@ -219,10 +237,10 @@ Sales 700 Cr, Rent 250 Dr  ──close──►  Dr Sales 700 · Cr Rent 250 · 
 The closing entry is dated one microsecond before `cutoff` (`domain::kClosingCutoffOffset` — exactly representable on every supported platform, so the same close is persisted identically everywhere), so afterwards `generateAsOf(cutoff)` is a post-closing trial balance (temporary accounts zero, retained earnings holding the result), while anything dated at or after `cutoff` belongs to the next period.
 
 - **Reports.** Trial balances and balance sheets include closing entries (post-closing view). Income statements exclude them (`trialbalance::ClosingEntries::Exclude`), so a closed year's income statement still reports its revenue, expenses, and net income.
-- **Repeated closing.** A second close with the same cutoff finds every temporary balance already zero and throws `NothingToCloseException`; nothing is posted. If backdated activity is posted into an already-closed range, closing that cutoff again closes exactly the residual — unless the range has also been *locked* as a closed accounting period ([§6](#accounting-periods-and-period-locking)), in which case such backdated postings are rejected in the first place.
+- **Repeated closing.** A second close with the same cutoff finds every temporary balance already zero and throws `NothingToCloseException`; nothing is posted. If backdated activity is posted into an already-closed range, closing that cutoff again closes exactly the residual — unless the range has also been *locked* as a closed accounting period ([§7](#accounting-periods-and-period-locking)), in which case such backdated postings are rejected in the first place.
 - **Guard rail.** Because income statements exclude closing entries, `posting::post` accepts a closing-kind entry only if it is exactly a complete close: Revenue/Expense/Equity accounts only, each account at most once, at most one Equity destination, and every Revenue/Expense balance brought to zero as of the entry's cutoff (its date + 1µs). Partial, reversed, split, or padded "closing" entries are rejected — whether posted live or replayed from a hand-edited snapshot — so the marker can never hide or reshape ordinary activity.
 
-## 6. Period Semantics
+## 7. Period Semantics
 
 `Period` is a validated, half-open range: `[start, end)`.
 
@@ -281,7 +299,7 @@ const auto entries = journalquery::findJournalEntries(
 - **Results** are copies of the matching `PostedJournalEntry`s (posting id, business date, description, kind, currency, lines), so they stay valid after later postings. Cost is a linear scan: O(entries × lines per entry).
 - **Persistence.** Queries operate on journal history only, so they return identical results before saving and after loading any v1/v2/v3 snapshot.
 
-## 7. Formula / Computed Account Example
+## 8. Formula / Computed Account Example
 
 A computed account is a name bound to a formula string, registered with `ComputedAccountRegistry::define`:
 
@@ -321,7 +339,7 @@ The Formula Engine has no knowledge of `ComputedAccountRegistry`, `ChartOfAccoun
 
 ### Resource Limits and Complexity
 
-The engine bounds every recursion that input can drive, so a hand-made snapshot or formula can fail, but never crash the process:
+The engine bounds every recursion and every super-linear cost that input can drive, so a malformed or adversarial snapshot, formula, or script is rejected with an ordinary LedgerCore error instead of overflowing the stack or hanging:
 
 | Limit | Value | Bounds | On violation |
 |---|---|---|---|
@@ -334,9 +352,11 @@ Tree traversals (trial balance, saving, account listings) and chart teardown are
 
 Costs worth knowing: posting, `hasPostingHistory`, and cumulative trial balances are O(1)/O(accounts) per call; as-of/period trial balances, journal queries, and closing are linear scans of history. Validating a closing entry replays history (O(history)), so a ledger with many closing entries pays O(closings × history) when posting them and again on load — about 1.2 s / 0.5 s for 1,000 closings over 100,000 entries. The closing-entry cap keeps that bounded: a snapshot can force at most 1,000 history replays, so load time stays proportional to file size instead of growing quadratically. All limits are LedgerCore errors, so the CLI reports them with exit code `2`.
 
-## 8. Testing
+These limits bound recursion depth and time, **not total memory**: input size itself is not capped, so a sufficiently large snapshot or script can still exhaust available memory. Typically that surfaces as `std::bad_alloc` (CLI exit code `3`), and posting, closing, adding accounts, and defining computed accounts are all-or-nothing under allocation failure; on a system that overcommits memory, the operating system may terminate the process instead.
 
-**733 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
+## 9. Testing
+
+**734 tests**, all passing, organized as one GoogleTest executable per module (two for the CLI) plus a single smoke test.
 
 | Module | Tests |
 |---|---|
@@ -351,7 +371,7 @@ Costs worth knowing: posting, `hasPostingHistory`, and cumulative trial balances
 | journalquery | 22 |
 | persistence | 84 |
 | exception safety (allocation-failure injection) | 5 |
-| cli (input parsing, command parsing, session, process-level end-to-end) | 120 |
+| cli (input parsing, command parsing, session, process-level end-to-end, the demo script) | 121 |
 | smoke | 1 |
 
 The suite mixes unit, integration, and property-style tests, targeted at the invariants the domain actually cares about rather than at raw line coverage:
@@ -374,7 +394,7 @@ The suite mixes unit, integration, and property-style tests, targeted at the inv
 
 Code coverage is not currently measured by this repository, so no coverage percentage is claimed.
 
-## 9. Build & Test
+## 10. Build & Test
 
 Requires **CMake >= 3.20** and a **C++17** compiler. Tested platforms: Linux with GCC 13 (CI also runs clang-tidy 18) and macOS with AppleClang. Windows is not currently supported — the end-to-end tests use POSIX process and file APIs. Configuring with tests enabled downloads GoogleTest (v1.14.0) via CMake `FetchContent`, so the first configure needs network access; no manual GoogleTest installation is needed.
 
@@ -477,7 +497,38 @@ Journal (USD): 1 entry
 
 In the REPL, a failing command prints `error: ...` and the session continues. In `--script` mode the first failing command stops the run with exit code `1` (command syntax, a malformed date or amount, a date outside the supported range, or a snapshot file problem) or `2` (a rule enforced by the engine, e.g. an unbalanced entry, an unknown account, or posting to a group account); `3` means an unexpected internal error. A script that completes exits `0`.
 
-## 10. Project Structure
+## 11. Demo Walkthrough
+
+[`examples/demo.txt`](examples/demo.txt) is a 27-command script that exercises the whole system: a chart with a group account, a fiscal year, three postings, a trial balance and income statement, two computed accounts (one referencing the other), a journal query, a year-end close into retained earnings, a period lock, a post-closing balance sheet, and a save → load → save round trip. A CTest case runs it on every build, so it stays in sync with the CLI.
+
+```sh
+cmake -S . -B build && cmake --build build
+cd build                       # the demo writes its two snapshots here (ignored by git)
+src/cli/ledgercore --script ../examples/demo.txt
+cmp demo.snapshot demo-reloaded.snapshot && echo "reloaded session saves identically"
+```
+
+What to look for in the output:
+
+- **Income statement:** Sales 700.00, Rent 250.00, Net Income 450.00.
+- **Computed accounts:** `EstimatedTax` = `@NetIncome * 0.3` = `135.00 USD`, evaluated with exact rational arithmetic.
+- **Closing:** `posted closing entry #4 into 3100 as of 2027-01-01 (net income 450.00 USD)`; `journal --closing` shows it dated `2026-12-31T23:59:59.999999000Z` (one microsecond before the cutoff), with Sales and Rent brought to zero.
+- **Balance sheet:** Assets 700.00 = Liabilities 250.00 + Retained Earnings 450.00, unclosed net income 0.00.
+- **Reload:** the trial balance after `load` matches the one before `save`, and `cmp` finds the two snapshots byte-identical. The snapshot itself (`demo.snapshot`) is plain text and worth reading: chart, `ENTRY`/`CLOSING` records in exact minor units, the `PERIOD` lock, and the computed definitions.
+
+To see the period lock reject a backdated posting while later dates are still accepted, continue interactively from the saved snapshot:
+
+```sh
+printf '%s\n' 'load demo.snapshot' \
+  'post --date 2026-12-15 --description "Late sale" --debit 1010:10.00 --credit 4000:10.00' \
+  'post --date 2027-01-05 --description "New year sale" --debit 1010:10.00 --credit 4000:10.00' \
+  | src/cli/ledgercore
+# output includes:
+# error: Cannot post an entry dated 2026-12-15 into closed accounting period [2026-01-01, 2027-01-01)
+# posted entry #5
+```
+
+## 12. Project Structure
 
 ```
 LedgerCore/
@@ -486,6 +537,8 @@ LedgerCore/
 ├── cmake/
 │   ├── CompilerWarnings.cmake
 │   └── Sanitizers.cmake
+├── examples/
+│   └── demo.txt
 ├── src/
 │   ├── domain/
 │   ├── ledger/
@@ -519,35 +572,49 @@ LedgerCore/
 
 Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `include/ledgercore/<module>/` (public headers), and `src/` (implementation); each `tests/<module>/` directory mirrors it with its own GoogleTest executable. `src/cli/` is an executable only, with no public headers.
 
-## 11. Design Principles
+## 13. Design Principles
 
 - **Domain-first architecture** — every dependency arrow points toward `domain`; nothing in `domain` knows any other module exists.
 - **Explicit invariants, enforced structurally where possible** — e.g. the Chart of Accounts tree cannot contain a cycle because the API to construct one doesn't exist, not because a runtime check rejects it.
 - **Immutable value/domain objects** — `Money`, `Currency`, `JournalEntry`, `Account`, `Period`, and generated snapshots (`TrialBalance`, `BalanceSheet`, `IncomeStatement`) have no setters and no path to a partially-valid state.
 - **Validate-then-commit** — `posting::post` and `ChartOfAccounts` mutation both run every fallible check before touching any persistent state, so a rejected operation leaves nothing changed.
 - **Exact monetary arithmetic** — `Money` and `Rational` are backed by `std::int64_t` with overflow checked before every operation; there is no floating point anywhere in an accounting calculation.
-- **Single source of truth for normal-balance rules** — `domain::isDebitNormal` / `signedEffect` / `debitCreditPresentation` are defined once and reused by `posting`, `trialbalance`, and `reporting`.
+- **Single source of truth for normal-balance rules** — `domain::isDebitNormal` / `signedEffect` / `debitCreditPresentation` are defined once and reused by `posting`, `trialbalance`, `reporting`, and `closing`.
 - **Deterministic output** — the same inputs always produce the same `TrialBalance`, `BalanceSheet`, `IncomeStatement`, or formula evaluation result.
-- **No report caching** — Trial Balance and report snapshots are regenerated on demand from the `Ledger`; there is no cache to keep coherent. Persistence stores only the chart, the journal history, and computed definitions, and rebuilds balances by replaying history.
+- **No report caching** — Trial Balance and report snapshots are regenerated on demand from the `Ledger`; there is no cache to keep coherent. Persistence stores only the chart, the journal history, accounting periods, and computed definitions, and rebuilds balances by replaying history.
 - **Tests mapped to accounting invariants** — test names and property tests target specific accounting properties (balance, atomicity, replay consistency, cycle-freedom), not just code paths.
 
-## 12. Current Status
+## 14. Known Limitations
 
-Version **1.0.0**. Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
+- **One currency per ledger.** Cross-currency arithmetic is rejected, and there is no currency conversion.
+- **Final-state persistence, not an audit log.** Snapshots record each accounting period's current state, not when it was locked; posting timestamps (`postedAt`) are not persisted.
+- **Accounting periods cannot be reopened** (`Open → Closed` is one-way).
+- **At most 1,000 closing entries per ledger.** Closing validation replays history, and the cap bounds that cost; it is a limit, not an incremental algorithm.
+- **Memory is not bounded.** The resource limits bound recursion and time, not input size (see [Resource Limits](#resource-limits-and-complexity)).
+- **Libraries are consumed in-tree only.** `cmake --install` installs only the CLI; there is no exported CMake package.
+- **Linux and macOS only.** Windows is not supported; the end-to-end test harness uses POSIX APIs.
+- **No `--version` flag.** The version is defined once, in the top-level `CMakeLists.txt` `project()` call, and stated in this README.
+- **No coverage measurement**, so no coverage percentage is claimed.
+- **No license file yet** (see [License](#17-license)).
 
-- 733 tests, all passing, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build
+## 15. Current Status
+
+Version **1.0.0**, tagged `v1.0.0`. Implemented: Chart of Accounts, Account hierarchy with AccountType inheritance, Money, Currency safety, exact integer-based monetary arithmetic, Journal Entries, Ledger, Posting Engine, cumulative/as-of/period-aware Trial Balance, the Formula Engine, Computed Accounts, Balance Sheet, Income Statement, closing entries into retained earnings, accounting periods with period locking, journal history queries, snapshot persistence, and the `ledgercore` CLI.
+
+- 734 tests, all passing, in the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build, on GCC (CI) and AppleClang
 - Clean build, zero project compiler warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion` and related flags, applied to every project target)
 - Production dependency graph verified directly against CMake target links and `#include` usage — no undocumented dependency exists
 
 This is not a claim of production readiness — see [Overview](#1-overview).
 
-## 13. Roadmap
+## 16. Roadmap
 
 Reasonable, currently-unimplemented future work:
 
 - Reopening a closed accounting period (deliberately unsupported today: `Open → Closed` is one-way)
 - Installing and exporting the engine libraries as a CMake package (today they are consumed in-tree)
 - Windows support (the engine is portable C++17; the end-to-end test harness is POSIX-only)
+- A `ledgercore --version` flag reporting the CMake project version
 - Incremental closing-entry validation, which would remove the need for the closing-entry cap
 - Coverage-guided fuzzing (libFuzzer) of the snapshot, formula, and CLI parsers; today they are covered by seeded fuzz-smoke tests
 - Richer fiscal-period abstractions (e.g. named fiscal calendars) built on top of the existing `Period` primitive
@@ -556,6 +623,6 @@ Reasonable, currently-unimplemented future work:
 
 None of the above is implemented today.
 
-## 14. License
+## 17. License
 
 This repository does not currently include a `LICENSE` file. No license is claimed or implied here; treat the source as all-rights-reserved until a license file is added.

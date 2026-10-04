@@ -12,11 +12,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #ifndef LEDGERCORE_CLI_PATH
 #error "LEDGERCORE_CLI_PATH must be defined by CMake"
+#endif
+#ifndef LEDGERCORE_DEMO_SCRIPT
+#error "LEDGERCORE_DEMO_SCRIPT must be defined by CMake"
 #endif
 
 namespace {
@@ -33,18 +38,9 @@ std::string uniqueTempPath(const std::string& label) {
            + ".txt";
 }
 
-// Writes `script` to a temp file, runs the CLI binary against it via
-// --script <path>, and captures combined stdout+stderr and the process
-// exit code.
-RunResult runScript(const std::string& script) {
-    const std::string scriptPath = uniqueTempPath("script");
-    {
-        std::ofstream out(scriptPath);
-        out << script;
-    }
-
-    const std::string command = std::string("\"") + LEDGERCORE_CLI_PATH + "\" --script \"" + scriptPath + "\" 2>&1";
-
+// Runs a shell command and captures its combined output (the command
+// redirects stderr itself) and exit code.
+RunResult runCommand(const std::string& command) {
     RunResult result;
     FILE* pipe = popen(command.c_str(), "r");
     if (pipe != nullptr) {
@@ -57,6 +53,22 @@ RunResult runScript(const std::string& script) {
     } else {
         result.exitCode = -1;
     }
+    return result;
+}
+
+// Writes `script` to a temp file, runs the CLI binary against it via
+// --script <path>, and captures combined stdout+stderr and the process
+// exit code.
+RunResult runScript(const std::string& script) {
+    const std::string scriptPath = uniqueTempPath("script");
+    {
+        std::ofstream out(scriptPath);
+        out << script;
+    }
+
+    const std::string command = std::string("\"") + LEDGERCORE_CLI_PATH + "\" --script \"" + scriptPath + "\" 2>&1";
+
+    const RunResult result = runCommand(command);
 
     std::remove(scriptPath.c_str());
     return result;
@@ -76,18 +88,7 @@ RunResult runRepl(const std::string& input) {
 
     const std::string command = std::string("\"") + LEDGERCORE_CLI_PATH + "\" < \"" + inputPath + "\" 2>&1";
 
-    RunResult result;
-    FILE* pipe = popen(command.c_str(), "r");
-    if (pipe != nullptr) {
-        char buffer[256];
-        while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            result.output += buffer;
-        }
-        const int status = pclose(pipe);
-        result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    } else {
-        result.exitCode = -1;
-    }
+    const RunResult result = runCommand(command);
 
     std::remove(inputPath.c_str());
     return result;
@@ -788,4 +789,51 @@ TEST(CliEndToEndTest, ComputedEvaluationBudgetFailureUsesAccountingExitCode) {
     const RunResult result = runScript(script);
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_NE(result.output.find("evaluation limit of 256 levels"), std::string::npos);
+}
+
+// The README's demo walkthrough is examples/demo.txt; running it here keeps
+// the documented demo from drifting out of date. It saves relative to the
+// working directory, so it runs inside a fresh temporary directory.
+TEST(CliEndToEndTest, ReadmeDemoScriptRunsAndItsReloadedSessionSavesIdentically) {
+    char directoryTemplate[] = "/tmp/ledgercore_cli_e2e_demo_XXXXXX";
+    const char* directory = ::mkdtemp(directoryTemplate);
+    ASSERT_NE(directory, nullptr);
+    const std::string dir(directory);
+
+    const RunResult result = runCommand("cd \"" + dir + "\" && \"" + std::string(LEDGERCORE_CLI_PATH) + "\" --script \""
+                                        + LEDGERCORE_DEMO_SCRIPT + "\" 2>&1");
+    const auto readFile = [](const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        std::ostringstream content;
+        content << in.rdbuf();
+        return content.str();
+    };
+    const std::string saved = readFile(dir + "/demo.snapshot");
+    const std::string resaved = readFile(dir + "/demo-reloaded.snapshot");
+    std::remove((dir + "/demo.snapshot").c_str());
+    std::remove((dir + "/demo-reloaded.snapshot").c_str());
+    ::rmdir(directory);
+
+    EXPECT_EQ(result.exitCode, 0) << result.output;
+    EXPECT_NE(result.output.find("posted closing entry #4 into 3100 as of 2027-01-01 (net income 450.00 USD)"),
+              std::string::npos)
+        << result.output;
+    EXPECT_NE(result.output.find("135.00 USD"), std::string::npos);
+    EXPECT_NE(result.output.find("Loaded LedgerCore session"), std::string::npos);
+    EXPECT_FALSE(saved.empty());
+    EXPECT_EQ(saved, resaved);
+
+    // The trial balance printed after `load` matches the one printed just
+    // before `save` (the last two of the script's three trial balances).
+    const auto trialBalanceAt = [&result](std::size_t start) {
+        const std::size_t end = result.output.find('\n', result.output.find("TOTAL", start));
+        return result.output.substr(start, end - start);
+    };
+    const std::size_t afterLoad = result.output.rfind("Trial Balance (USD)");
+    ASSERT_NE(afterLoad, std::string::npos);
+    const std::size_t beforeSave = result.output.rfind("Trial Balance (USD)", afterLoad - 1);
+    ASSERT_NE(beforeSave, std::string::npos);
+    EXPECT_EQ(trialBalanceAt(beforeSave), trialBalanceAt(afterLoad));
+    EXPECT_NE(trialBalanceAt(afterLoad).find("3100      RetainedEarnings                  0.00 USD        450.00 USD"),
+              std::string::npos);
 }
