@@ -1,0 +1,12 @@
+account create-root --code 1000 --name Cash --type asset
+account create-child --parent 1000 --code 1010 --name Till
+account create-root --code 4000 --name Sales --type revenue
+post --date 2026-01-31 --description "one" --debit 1010:10.50 --credit 4000:10.50
+post --date 2026-02-30 --description bad --debit 1010:1 --credit 4000:1
+post --date 2026-03-01 --description unbalanced --debit 1010:2.00 --credit 4000:1.00
+account list --tree
+account show 1010
+trial-balance --from 2026-01-01 --to 2026-02-01
+trial-balance --as-of 2026-02-01
+balance-sheet
+income-statement

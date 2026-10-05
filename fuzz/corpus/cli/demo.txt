@@ -1,0 +1,47 @@
+# LedgerCore demo: build -> post -> report -> compute -> query -> close ->
+# lock -> save -> load. Run from any writable directory:
+#   ledgercore --script <path-to>/examples/demo.txt
+# It writes demo.snapshot and demo-reloaded.snapshot into the current
+# directory; `cmp demo.snapshot demo-reloaded.snapshot` then shows the
+# reloaded session saves byte-for-byte identically.
+
+# 1. Chart of accounts (1000 is a group account; only leaves take postings)
+account create-root --code 1000 --name Assets --type asset
+account create-child --parent 1000 --code 1010 --name Cash
+account create-child --parent 1000 --code 1020 --name Receivables
+account create-root --code 2000 --name Payables --type liability
+account create-root --code 3100 --name RetainedEarnings --type equity
+account create-root --code 4000 --name Sales --type revenue
+account create-root --code 5000 --name Rent --type expense
+
+# 2. A fiscal year, and its activity
+period create --start 2026-01-01 --end 2027-01-01
+post --date 2026-03-10 --description "Cash sale" --debit 1010:500.00 --credit 4000:500.00
+post --date 2026-06-01 --description "Invoice" --debit 1020:200.00 --credit 4000:200.00
+post --date 2026-07-01 --description "Rent" --debit 5000:250.00 --credit 2000:250.00
+
+# 3. Reports
+trial-balance
+income-statement --from 2026-01-01 --to 2027-01-01
+
+# 4. Computed accounts (exact arithmetic; @name references another one)
+computed define --name NetIncome --formula "#4000 - #5000"
+computed define --name EstimatedTax --formula "@NetIncome * 0.3"
+computed eval EstimatedTax
+
+# 5. Journal history for one account
+journal --account 4000
+
+# 6. Year end: close Revenue/Expense into retained earnings, then lock the year
+close --retained-earnings 3100 --as-of 2027-01-01
+period close --start 2026-01-01 --end 2027-01-01
+balance-sheet --as-of 2027-01-01
+journal --closing
+period list
+
+# 7. Save, reload (replays every entry through posting), and save again
+trial-balance
+save demo.snapshot
+load demo.snapshot
+trial-balance
+save demo-reloaded.snapshot

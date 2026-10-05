@@ -27,6 +27,7 @@
 #include "ledgercore/posting/PostingEngine.h"
 #include "ledgercore/posting/PostingExceptions.h"
 
+#include "SnapshotStream.h"
 #include "TimestampConversion.h"
 
 namespace ledgercore::persistence {
@@ -292,8 +293,12 @@ void writeAccount(std::ostream& out, const domain::Account& account) {
     }
 }
 
+} // namespace
+
+namespace detail {
+
 void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
-                    const computed::ComputedAccountRegistry& computedAccounts) {
+                   const computed::ComputedAccountRegistry& computedAccounts) {
     bool hasClosingEntry = false;
     for (const ledger::PostedJournalEntry& posted : ledger.postedEntries()) {
         hasClosingEntry = hasClosingEntry || posted.entry().isClosing();
@@ -355,6 +360,10 @@ void writeSnapshot(std::ostream& out, const domain::ChartOfAccounts& chart, cons
             << '\n';
     }
 }
+
+} // namespace detail
+
+namespace {
 
 // ---------------------------------------------------------------------
 // Reading
@@ -607,7 +616,7 @@ void save(const domain::ChartOfAccounts& chart, const ledger::Ledger& ledger,
         }
 
         try {
-            writeSnapshot(out, chart, ledger, computedAccounts);
+            detail::writeSnapshot(out, chart, ledger, computedAccounts);
         } catch (...) {
             out.close();
             std::error_code removeError;
@@ -639,8 +648,13 @@ LoadedSession load(const std::filesystem::path& path) {
     if (!in.is_open()) {
         throw PersistenceException("cannot open file for reading: " + path.u8string());
     }
+    return detail::readSnapshot(in);
+}
+
+namespace detail {
+
+LoadedSession readSnapshot(std::istream& in) {
     const std::vector<std::string> lines = readAllLines(in);
-    in.close();
 
     std::size_t index = 0;
     const std::int64_t version = readHeaderVersion(lines, index);
@@ -689,5 +703,7 @@ LoadedSession load(const std::filesystem::path& path) {
     applyPeriods(pendingPeriods, *ledgerPtr);
     return LoadedSession{std::move(chart), std::move(ledgerPtr), std::move(registry)};
 }
+
+} // namespace detail
 
 } // namespace ledgercore::persistence

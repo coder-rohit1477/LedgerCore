@@ -1,0 +1,10 @@
+account create-root --code 4000 --name Sales --type revenue
+formula eval (1 + 2) * 3 / 4
+formula eval #4000 - 1
+computed define --name A --formula "#4000 * 2"
+computed define --name B --formula "@A + @A"
+computed define --name C --formula "@C"
+computed list
+computed eval B
+computed eval C
+computed eval Missing

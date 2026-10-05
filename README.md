@@ -387,7 +387,7 @@ The suite mixes unit, integration, and property-style tests, targeted at the inv
 - reporting equations (Balance Sheet / Income Statement identities hold after randomized posting sequences)
 - accounting periods (overlap rules, one-way lifecycle, `[start, end)` lock boundaries, atomic rejection of backdated postings, report invariance under locking, v3 final-state persistence and hand-edited period records)
 - exception safety: every mutating engine operation (posting, closing, adding accounts, defining computed accounts) re-run with each of its allocations failing in turn, checking that nothing observable changed
-- adversarial input: deep charts, deep formulas and dependency chains at and beyond every limit, and seeded fuzz-smoke tests that corrupt valid snapshots and feed random text to the formula and CLI parsers (no crash, only LedgerCore errors — under ASan/UBSan in CI)
+- adversarial input: deep charts, deep formulas and dependency chains at and beyond every limit, and seeded fuzz-smoke tests that corrupt valid snapshots and feed random text to the formula and CLI parsers (no crash, only LedgerCore errors — under ASan/UBSan in CI); beyond the test suite, coverage-guided libFuzzer targets for the same three boundaries ([Fuzzing](#fuzzing))
 - journal history queries (each filter and their combination, `[start, end)` boundaries, posting-order determinism, same-date ordering, exact Money/currency, read-only behaviour, identical results across save/load for v1/v2/v3)
 - closing entries (sign correctness for every account type, net income/loss, contra balances, invalid targets, atomic failure, repeated and multi-year closing, report consistency before and after closing)
 - persistence round trips (save → load → save is byte-identical), corruption and version handling, failed-load isolation, date-range boundaries, exact-or-rejected timestamp loading for every clock tick size (nanosecond, 100 ns, microsecond), including pre-1970 instants
@@ -493,6 +493,7 @@ GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on 
 | ASan + UBSan | GCC, `Debug`, `-DLEDGERCORE_SANITIZE=ON` | confirms both sanitizers are compiled in and linked, then the full CTest suite (with LeakSanitizer) |
 | Static analysis | clang-tidy 18 with [`.clang-tidy`](.clang-tidy) | every `src/**/*.cpp` file and project headers; any finding is an error |
 | Windows | MSVC (Visual Studio 2022, `windows-2022`), `Release` and `Debug` | configure, build, warning count, full CTest suite in both configurations, both configurations installed into one prefix and consumed by an external `find_package` project, source tree left clean |
+| Fuzzing | Clang 18 + libFuzzer, ASan + UBSan, `-DLEDGERCORE_BUILD_FUZZERS=ON` | replays every seed corpus, then fuzzes each target for 60 s; any crash, sanitizer report, hang, or contract violation fails the job and uploads the failing input |
 
 To reproduce locally, use the build and sanitizer commands above (add `-DCMAKE_BUILD_TYPE=Release` or `Debug` to match CI), and for static analysis:
 
@@ -500,6 +501,30 @@ To reproduce locally, use the build and sanitizer commands above (add `-DCMAKE_B
 cmake -S . -B build-tidy -DCMAKE_CXX_COMPILER=clang++
 find src -name '*.cpp' | xargs clang-tidy -p build-tidy --quiet
 ```
+
+### Fuzzing
+
+Three coverage-guided [libFuzzer](https://llvm.org/docs/LibFuzzer.html) targets in [`fuzz/`](fuzz) cover the inputs LedgerCore accepts from outside:
+
+| Target | Input | Checked for every input |
+|---|---|---|
+| `ledgercore_snapshot_fuzzer` | bytes read as a snapshot, in memory | a documented exception or a session; same outcome twice; an accepted snapshot saves, reloads, and saves again byte-identically |
+| `ledgercore_formula_fuzzer` | a formula, parsed and evaluated against fixed books, directly and as a computed account | a value or a LedgerCore exception; same outcome twice |
+| `ledgercore_cli_fuzzer` | a script run through the CLI's command layer on a fresh session (`save`/`load` lines skipped, no shell, no files) | every failure handled by the command layer (never the CLI's "internal error"); identical transcript twice |
+
+Fuzzing is opt-in and needs Clang with the libFuzzer runtime (on Ubuntu: `clang` and `libclang-rt-<version>-dev`; Apple's Clang does not ship it). `LEDGERCORE_BUILD_FUZZERS=ON` instruments the whole build directory with libFuzzer coverage plus ASan and UBSan, so use a separate build directory; normal builds are unaffected, and the fuzz targets are never installed or packaged:
+
+```sh
+cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DLEDGERCORE_BUILD_FUZZERS=ON -DLEDGERCORE_BUILD_TESTS=OFF
+cmake --build build-fuzz
+ctest --test-dir build-fuzz                           # replays every seed once
+
+mkdir -p fuzz-work && cp fuzz/corpus/snapshot/* fuzz-work/
+build-fuzz/fuzz/ledgercore_snapshot_fuzzer -max_total_time=300 -timeout=5 \
+    -dict=fuzz/dictionaries/snapshot.dict fuzz-work   # likewise: formula, cli
+```
+
+Seed corpora live in `fuzz/corpus/<target>/` and token dictionaries in `fuzz/dictionaries/<target>.dict`; fuzz in a scratch directory so the committed seeds stay small. A failing input is written to `crash-<hash>` (or `timeout-`, `oom-`); replay it with `build-fuzz/fuzz/ledgercore_<target>_fuzzer crash-<hash>`, fix the defect, and add a minimized copy (`-minimize_crash=1`) to the target's seed corpus so CTest replays it from then on.
 
 ### Running the CLI
 
@@ -598,6 +623,7 @@ LedgerCore/
 │   └── Sanitizers.cmake
 ├── examples/
 │   └── demo.txt
+├── fuzz/                 (opt-in libFuzzer targets, seed corpora, dictionaries)
 ├── src/
 │   ├── domain/
 │   ├── ledger/
@@ -632,7 +658,7 @@ LedgerCore/
 └── README.md
 ```
 
-Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `include/ledgercore/<module>/` (public headers), and `src/` (implementation); each `tests/<module>/` directory mirrors it with its own GoogleTest executable. `src/cli/` is an executable only, with no public headers.
+Each library `src/<module>/` directory contains its own `CMakeLists.txt`, `include/ledgercore/<module>/` (public headers), and `src/` (implementation); each `tests/<module>/` directory mirrors it with its own GoogleTest executable. `src/cli/` has no public headers: its command layer is an internal, uninstalled static library (`ledgercore_cli_logic`) shared by the `ledgercore` executable, the CLI tests, and the fuzz targets.
 
 ## 13. Design Principles
 
@@ -673,7 +699,6 @@ Reasonable, currently-unimplemented future work:
 
 - Reopening a closed accounting period (deliberately unsupported today: `Open → Closed` is one-way)
 - Incremental closing-entry validation, which would remove the need for the closing-entry cap
-- Coverage-guided fuzzing (libFuzzer) of the snapshot, formula, and CLI parsers; today they are covered by seeded fuzz-smoke tests
 - Richer fiscal-period abstractions (e.g. named fiscal calendars) built on top of the existing `Period` primitive
 - Additional reporting capabilities (e.g. comparative periods, cash flow statement)
 - Performance work on full-history replay in `generateAsOf`/`generateForPeriod`, if a future use case demonstrates it's actually needed

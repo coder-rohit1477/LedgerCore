@@ -15,6 +15,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(GNUInstallDirs)
 include(cmake/CompilerWarnings.cmake)
 include(cmake/Sanitizers.cmake)
+include(cmake/Fuzzing.cmake)
 
 # Tests (and the GoogleTest download they need) are built by default only
 # when LedgerCore is the top-level project, so a parent project that pulls
@@ -35,11 +36,16 @@ option(LEDGERCORE_INSTALL "Install the LedgerCore library as a CMake package" ${
 
 add_subdirectory(src)
 
-if (LEDGERCORE_INSTALL)
+if (LEDGERCORE_INSTALL AND NOT LEDGERCORE_BUILD_FUZZERS)
     include(cmake/LedgerCorePackage.cmake)
 endif()
 
-if (LEDGERCORE_BUILD_TESTS)
+if (LEDGERCORE_BUILD_TESTS OR LEDGERCORE_BUILD_FUZZERS)
     enable_testing()
+endif()
+if (LEDGERCORE_BUILD_TESTS)
     add_subdirectory(tests)
+endif()
+if (LEDGERCORE_BUILD_FUZZERS)
+    add_subdirectory(fuzz)
 endif()

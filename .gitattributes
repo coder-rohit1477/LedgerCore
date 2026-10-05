@@ -1,0 +1,3 @@
+# Fuzz seeds are raw byte inputs (one deliberately uses CRLF): never convert
+# their line endings or diff them as text.
+fuzz/corpus/** binary

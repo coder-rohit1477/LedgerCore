@@ -8,6 +8,8 @@
 #                GCC's sanitizer runtimes (libasan, libubsan) are hard
 #                dependencies of g++ on Ubuntu, so no extra packages are needed.
 #   clang-tidy   Static analysis of src/ with the repository's .clang-tidy.
+#   fuzz         Clang 18 + libFuzzer (ASan + UBSan): replays the seed
+#                corpora, then fuzzes each target for a bounded time.
 #   windows      MSVC (Visual Studio 2022), Release and Debug: configure,
 #                build, full CTest suite; reports compiler warnings; installs
 #                both configurations into one prefix and builds and runs an
@@ -133,6 +135,50 @@ jobs:
         run: |
           find src -name '*.cpp' -print0 | sort -z \
             | xargs -0 -n 1 -P "$(nproc)" "${CLANG_TIDY}" -p build/tidy --quiet
+
+  fuzz:
+    name: Fuzzing (Clang, libFuzzer)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Ubuntu's Clang ships libFuzzer and the sanitizer runtimes separately.
+      - name: Toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libclang-rt-18-dev
+          clang++-18 --version
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build/fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++-18
+          -DLEDGERCORE_BUILD_FUZZERS=ON -DLEDGERCORE_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build/fuzz --parallel "$(nproc)"
+
+      - name: Replay seed corpora
+        run: ctest --test-dir build/fuzz --output-on-failure
+
+      - name: Fuzz (60 s per target)
+        run: |
+          for target in snapshot formula cli; do
+            mkdir -p "build/fuzz-work/$target" build/fuzz-artifacts
+            cp fuzz/corpus/$target/* "build/fuzz-work/$target/"
+            "build/fuzz/fuzz/ledgercore_${target}_fuzzer" -max_total_time=60 -timeout=5 -rss_limit_mb=2048 \
+              -print_final_stats=1 -dict="fuzz/dictionaries/$target.dict" \
+              -artifact_prefix=build/fuzz-artifacts/ "build/fuzz-work/$target"
+          done
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: build/fuzz-artifacts/
+          if-no-files-found: ignore
 
   windows:
     name: Build and test (MSVC, Windows)

@@ -1,0 +1,14 @@
+account create-root --code 1000 --name Cash --type asset
+account create-root --code 3100 --name RE --type equity
+account create-root --code 4000 --name Sales --type revenue
+period create --start 2026-01-01 --end 2026-07-01
+period create --start 2026-07-01 --end 2027-01-01
+post --date 2026-03-01 --description s --debit 1000:5 --credit 4000:5
+close --retained-earnings 3100 --as-of 2026-07-01
+period close --start 2026-01-01 --end 2026-07-01
+post --date 2026-05-01 --description late --debit 1000:1 --credit 4000:1
+journal --from 2026-01-01 --to 2027-01-01 --account 4000
+journal --closing
+journal --standard --closing
+period list
+exit
